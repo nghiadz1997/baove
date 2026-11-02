@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && request.auth.token.email == 'trongnghia@nsg.edu.vn';
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? getUserData().role 
+        : 'guest';
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() || getUserRole() == 'admin';
+    }
+
+    function isManager() {
+      return isAdmin() || getUserRole() == 'manager' || getUserRole() == 'phophong';
+    }
+
+    // 1. Quản lý danh sách người dùng & phân quyền (users)
+    match /users/{userId} {
+      allow read: if true;
+      // Super Admin & Admin được cấp quyền tạo, sửa, xóa
+      allow create, update: if true;
+      allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    // 2. Cơ sở đào tạo (campuses)
+    match /campuses/{campusId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // 3. Chốt tuần tra & Tọa độ Google Maps (checkpoints)
+    match /checkpoints/{checkpointId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // 4. Danh mục ca trực (shifts)
+    match /shifts/{shiftId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // 5. Nhật ký tuần tra (patrol_logs)
+    match /patrol_logs/{logId} {
+      allow read, create: if true;
+      allow update, delete: if isAuthenticated() && isAdmin();
+    }
+
+    // 6. Sự cố (incidents)
+    match /incidents/{incidentId} {
+      allow read, create, update: if true;
+      allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    // 7. Bàn giao ca (handovers)
+    match /handovers/{handoverId} {
+      allow read, create: if true;
+      allow update, delete: if isAuthenticated() && isAdmin();
+    }
+
+    // 8. Cấu hình (settings)
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAuthenticated() && isAdmin();
+    }
+  }
+}

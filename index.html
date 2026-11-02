@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="vi" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>NSG SMART GUARD - Hệ Thống An Ninh & Tuần Tra Mobile First</title>
+
+  <!-- PWA Meta Tags -->
+  <link rel="manifest" href="./manifest.webmanifest">
+  <meta name="theme-color" content="#1e40af">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="NSG Guard">
+  <link rel="apple-touch-icon" href="./icons/logo.png">
+  <link rel="icon" type="image/png" href="./icons/logo.png">
+
+  <!-- Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+
+  <!-- Leaflet CSS for Map Tiles (Google Maps Engine) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'Inter', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#eff6ff',
+              100: '#dbeafe',
+              200: '#bfdbfe',
+              300: '#93c5fd',
+              400: '#60a5fa',
+              500: '#3b82f6',
+              600: '#2563eb',
+              700: '#1d4ed8',
+              800: '#1e40af',
+              900: '#1e3a8a',
+              950: '#0f172a',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- HTML5 QR Code Scanner Library -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Custom App Styles -->
+  <link rel="stylesheet" href="./css/app.css">
+</head>
+
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 min-h-screen flex flex-col font-sans select-none antialiased">
+
+  <!-- ========================================== -->
+  <!-- TOP PERSISTENT CONTROLLER & SWITCHER BAR   -->
+  <!-- ========================================== -->
+  <header class="no-print sticky top-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800 safe-top">
+    <div class="max-w-7xl mx-auto px-3 py-2 flex items-center justify-between gap-2">
+      <!-- Brand Logo & School Name -->
+      <div class="flex items-center gap-2.5 shrink-0">
+        <div class="w-8 h-8 rounded-xl bg-blue-600 flex items-center justify-center text-white font-black text-sm shadow-sm shadow-blue-500/30">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <div>
+          <div class="font-extrabold text-xs tracking-tight text-blue-900 dark:text-blue-400 leading-none">NSG SMART GUARD</div>
+          <div class="text-[9px] text-slate-400 font-medium">Cao Đẳng Nam Sài Gòn</div>
+        </div>
+      </div>
+
+      <!-- Mode Switcher Pills -->
+      <div class="flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-xl border border-slate-200/60 dark:border-slate-700/60 text-xs">
+        <button data-mode="guard_mobile" class="view-mode-btn px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1.5" title="Giao diện di động cho Bảo vệ">
+          <i class="fa-solid fa-mobile-screen-button"></i>
+          <span class="hidden sm:inline">Bảo Vệ</span>
+        </button>
+        <button data-mode="manager_mobile" class="view-mode-btn px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1.5" title="Dashboard di động cho Quản lý / BGH">
+          <i class="fa-solid fa-user-tie"></i>
+          <span class="hidden sm:inline">Quản Lý Mobile</span>
+        </button>
+        <button data-mode="desktop_admin" class="view-mode-btn px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1.5" title="Giao diện quản trị trên máy tính">
+          <i class="fa-solid fa-desktop"></i>
+          <span class="hidden sm:inline">Desktop Admin</span>
+        </button>
+      </div>
+
+      <!-- Right Controls: User Badge, Status & Theme Toggle -->
+      <div class="flex items-center gap-2 shrink-0">
+        <div id="header-user-badge" class="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-50 dark:bg-slate-800 text-blue-700 dark:text-blue-300 text-xs font-bold border border-blue-200 dark:border-slate-700">
+          <i class="fa-solid fa-circle-user"></i>
+          <span id="header-user-email" class="max-w-[130px] truncate">Đang tải...</span>
+        </div>
+        <div id="header-gps-indicator" class="w-2.5 h-2.5 rounded-full bg-emerald-500 gps-live-dot" title="GPS Trực tuyến"></div>
+        <button id="btn-toggle-theme" class="w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200 transition" title="Đổi giao diện Sáng/Tối">
+          <i id="theme-toggle-icon" class="fa-solid fa-moon text-xs"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+
+  <!-- ========================================== -->
+  <!-- VIEW 1: MOBILE APP - DÀNH CHO BẢO VỆ      -->
+  <!-- ========================================== -->
+  <main id="view-guard-mobile" class="flex-1 max-w-lg w-full mx-auto pb-24 safe-bottom-nav">
+
+    <!-- 1.1. OFFLINE STATUS BANNER -->
+    <div id="offline-status-banner" class="hidden mx-3 mt-2 p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-700 dark:text-amber-300 text-xs flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <i class="fa-solid fa-wifi-slash text-base"></i>
+        <span>Đang mất kết nối mạng. Dữ liệu quét QR vẫn được lưu an toàn trên máy và tự động đồng bộ khi có sóng!</span>
+      </div>
+      <span class="px-2 py-0.5 rounded bg-amber-500 text-white text-[10px] font-bold">Offline</span>
+    </div>
+
+    <!-- ---------------------------------------- -->
+    <!-- TAB PANE: TRANG CHỦ                      -->
+    <!-- ---------------------------------------- -->
+    <div id="tab-pane-home" class="p-3.5 space-y-4">
+      
+      <!-- Guard Identity Card & Shift Status -->
+      <div class="relative overflow-hidden bg-gradient-to-br from-blue-900 via-blue-800 to-indigo-950 text-white rounded-3xl p-5 shadow-lg shadow-blue-900/20">
+        <i class="fa-solid fa-shield-halved absolute -right-6 -bottom-6 text-8xl text-white/5 pointer-events-none"></i>
+
+        <div class="flex items-start justify-between gap-3 relative z-10">
+          <div class="flex items-center gap-3">
+            <img id="home-guard-avatar" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150" alt="Avatar" class="w-13 h-13 rounded-2xl object-cover border-2 border-white/30 shadow-md">
+            <div>
+              <div class="flex items-center gap-2">
+                <h2 id="home-guard-name" class="font-extrabold text-base tracking-tight text-white leading-tight">Đang tải...</h2>
+                <span id="home-guard-code" class="px-1.5 py-0.5 rounded bg-white/20 text-[10px] font-mono font-bold">BV</span>
+              </div>
+              <p id="home-campus-name" class="text-xs text-blue-200 mt-0.5 flex items-center gap-1">
+                <i class="fa-solid fa-location-dot text-rose-400"></i> Cao Đẳng Nam Sài Gòn
+              </p>
+            </div>
+          </div>
+
+          <div id="home-duty-status-badge"></div>
+        </div>
+
+        <!-- Shift & Assignment Details -->
+        <div class="mt-4 pt-3.5 border-t border-white/10 grid grid-cols-2 gap-2 text-xs relative z-10">
+          <div class="bg-black/20 backdrop-blur-xs rounded-xl p-2.5">
+            <div class="text-[10px] text-blue-200 uppercase font-bold tracking-wider">Ca trực hiện tại</div>
+            <div id="home-shift-badge" class="font-bold text-sm text-white mt-0.5">Ca trực phân công</div>
+            <div id="home-shift-hours" class="text-[11px] text-blue-300">--:-- - --:--</div>
+          </div>
+          <div class="bg-black/20 backdrop-blur-xs rounded-xl p-2.5">
+            <div class="text-[10px] text-blue-200 uppercase font-bold tracking-wider">Cơ sở & Khuôn viên</div>
+            <div class="font-bold text-sm text-white mt-0.5">Nam Sài Gòn</div>
+            <div class="text-[11px] text-emerald-300">Google Maps GPS On</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Patrol Progress Summary Card -->
+      <div class="bg-white dark:bg-slate-800 rounded-3xl p-5 border border-slate-200/80 dark:border-slate-700 shadow-xs">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h3 class="font-bold text-sm text-slate-800 dark:text-slate-100">Tiến Độ Tuần Tra Ca Trực</h3>
+            <p class="text-[11px] text-slate-500 dark:text-slate-400">Kiểm tra định kỳ các điểm chốt</p>
+          </div>
+          <span id="home-progress-percent" class="font-extrabold text-xl text-blue-600 dark:text-blue-400 font-mono">0%</span>
+        </div>
+
+        <div class="w-full h-3 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden mb-4">
+          <div id="home-progress-bar" class="h-full rounded-full bg-gradient-to-r from-blue-600 to-emerald-500 transition-all duration-500" style="width: 0%"></div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2 text-center">
+          <div class="p-2.5 rounded-2xl bg-blue-50/70 dark:bg-blue-950/40 border border-blue-100 dark:border-blue-900/40">
+            <span class="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase block">Tổng số chốt</span>
+            <span id="home-total-count" class="text-base font-extrabold text-blue-900 dark:text-blue-200 font-mono">0</span>
+          </div>
+          <div class="p-2.5 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-100 dark:border-emerald-900/40">
+            <span class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase block">Đã kiểm tra</span>
+            <span id="home-checked-count" class="text-base font-extrabold text-emerald-700 dark:text-emerald-300 font-mono">0</span>
+          </div>
+          <div class="p-2.5 rounded-2xl bg-amber-50/70 dark:bg-amber-950/40 border border-amber-100 dark:border-amber-900/40">
+            <span class="text-[10px] font-bold text-amber-600 dark:text-amber-400 uppercase block">Số điểm còn</span>
+            <span id="home-remaining-count" class="text-base font-extrabold text-amber-700 dark:text-amber-300 font-mono">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- HERO ACTION: BIG QR SCANNER BUTTON -->
+      <button 
+        data-action="open-scanner"
+        class="w-full py-4.5 px-6 rounded-3xl bg-gradient-to-r from-blue-600 via-blue-700 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-extrabold text-base shadow-lg shadow-blue-600/30 active:scale-[0.98] transition flex items-center justify-center gap-3 touch-target">
+        <div class="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center text-xl">
+          <i class="fa-solid fa-qrcode"></i>
+        </div>
+        <div class="text-left">
+          <div class="text-base leading-tight">QUÉT MÃ QR TUẦN TRA</div>
+          <div class="text-[11px] text-blue-200 font-normal">Kích hoạt Camera & Định vị Google Maps</div>
+        </div>
+      </button>
+
+      <!-- HERO ACTION: FAST INCIDENT & SHIFT -->
+      <div class="grid grid-cols-2 gap-3">
+        <button 
+          id="btn-open-incident-form"
+          class="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300 font-bold text-xs hover:bg-rose-100 transition flex items-center gap-2.5 active:scale-95 touch-target">
+          <div class="w-8 h-8 rounded-xl bg-rose-600 text-white flex items-center justify-center text-sm shrink-0">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+          </div>
+          <div class="text-left">
+            <div class="font-extrabold text-rose-800 dark:text-rose-200">Báo Sự Cố</div>
+            <div class="text-[10px] text-rose-500 font-normal">Chụp ảnh hiện trường</div>
+          </div>
+        </button>
+
+        <button 
+          id="btn-quick-checkin-shift"
+          class="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 text-emerald-700 dark:text-emerald-300 font-bold text-xs hover:bg-emerald-100 transition flex items-center gap-2.5 active:scale-95 touch-target">
+          <div class="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center text-sm shrink-0">
+            <i class="fa-solid fa-fingerprint"></i>
+          </div>
+          <div class="text-left">
+            <div class="font-extrabold text-emerald-800 dark:text-emerald-200">Nhận Ca Trực</div>
+            <div class="text-[10px] text-emerald-500 font-normal">Điểm danh vào ca</div>
+          </div>
+        </button>
+      </div>
+
+      <!-- Recent Scan History List -->
+      <div class="space-y-2 pt-1">
+        <div class="flex items-center justify-between px-1">
+          <h4 class="font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Lịch sử quét QR gần nhất</h4>
+          <button onclick="window.appController.switchGuardTab('patrol')" class="text-xs text-blue-600 dark:text-blue-400 font-bold hover:underline">
+            Xem tất cả
+          </button>
+        </div>
+        <div id="home-recent-scans-list" class="space-y-2"></div>
+      </div>
+
+    </div>
+
+    <!-- ---------------------------------------- -->
+    <!-- TAB PANE: TUẦN TRA (PATROL SCREEN)        -->
+    <!-- ---------------------------------------- -->
+    <div id="tab-pane-patrol" class="hidden p-3.5 space-y-4">
+      
+      <div class="bg-white dark:bg-slate-800 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-700 shadow-xs">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-extrabold text-base text-slate-800 dark:text-slate-100">Nhiệm Vụ Tuần Tra</h3>
+          <span id="patrol-progress-percent" class="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 font-mono">0%</span>
+        </div>
+        <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">
+          Chọn điểm bất kỳ theo tuyến tuần tra của bạn. Hệ thống xác thực mã QR và đối chiếu định vị Google Maps.
+        </p>
+
+        <div class="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden mb-2">
+          <div id="patrol-progress-bar" class="h-full rounded-full bg-gradient-to-r from-blue-600 to-emerald-500 transition-all duration-300" style="width: 0%"></div>
+        </div>
+
+        <div class="flex items-center justify-between text-xs text-slate-500 font-medium">
+          <span>Đã kiểm tra: <strong id="patrol-checked-count" class="text-emerald-600">0</strong></span>
+          <span>Còn lại: <strong id="patrol-remaining-count" class="text-amber-600">0</strong></span>
+          <span>Tổng số: <strong id="patrol-total-count" class="text-slate-700 dark:text-slate-200">0</strong></span>
+        </div>
+      </div>
+
+      <!-- Filters -->
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Khu nhà</label>
+          <select id="patrol-filter-zone" class="w-full px-2.5 py-2 rounded-xl text-xs bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 font-medium">
+            <option value="all">Tất cả khu</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Tầng lầu</label>
+          <select id="patrol-filter-floor" class="w-full px-2.5 py-2 rounded-xl text-xs bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 font-medium">
+            <option value="all">Tất cả tầng</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Trạng thái</label>
+          <select id="patrol-filter-status" class="w-full px-2.5 py-2 rounded-xl text-xs bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 font-medium">
+            <option value="all">Tất cả</option>
+            <option value="unchecked">Chưa quét</option>
+            <option value="checked">Đã kiểm tra</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Checkpoint Card List -->
+      <div id="patrol-checkpoints-list" class="space-y-3"></div>
+
+      <!-- Patrol History Section -->
+      <div class="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2">
+        <h4 class="font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 px-1">Nhật ký tuần tra gần nhất</h4>
+        <div id="patrol-history-list" class="space-y-2"></div>
+      </div>
+
+    </div>
+
+    <!-- ---------------------------------------- -->
+    <!-- TAB PANE: LỊCH TRỰC (CA CỐ ĐỊNH)         -->
+    <!-- ---------------------------------------- -->
+    <div id="tab-pane-shifts" class="hidden p-3.5 space-y-4">
+      
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-extrabold text-base text-slate-800 dark:text-slate-100">Lịch Trực Ca Cố Định</h3>
+          <p class="text-xs text-slate-500 dark:text-slate-400">Phân công lực lượng bảo vệ Nam Sài Gòn</p>
+        </div>
+        <span class="px-2.5 py-1 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+          Ca cố định
+        </span>
+      </div>
+
+      <div id="shifts-card-container" class="space-y-3"></div>
+
+    </div>
+
+    <!-- ---------------------------------------- -->
+    <!-- TAB PANE: TÀI KHOẢN                      -->
+    <!-- ---------------------------------------- -->
+    <div id="tab-pane-account" class="hidden p-3.5 space-y-4">
+      
+      <div class="bg-white dark:bg-slate-800 rounded-3xl p-5 border border-slate-200/80 dark:border-slate-700 shadow-xs flex items-center gap-4">
+        <img id="account-user-avatar" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150" alt="Avatar" class="w-16 h-16 rounded-2xl object-cover border-2 border-blue-500 shadow-sm">
+        <div>
+          <h3 id="account-user-name" class="font-extrabold text-base text-slate-800 dark:text-slate-100">Đang tải...</h3>
+          <p id="account-user-code" class="text-xs font-mono font-bold text-blue-600 dark:text-blue-400">Mã: --</p>
+          <p id="account-user-phone" class="text-xs text-slate-500 mt-0.5">SĐT: --</p>
+          <span id="account-user-role-badge" class="inline-block mt-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+            Vai trò: BẢO VỆ
+          </span>
+        </div>
+      </div>
+
+      <!-- App Info & System Status -->
+      <div class="bg-white dark:bg-slate-800 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-700 shadow-xs space-y-3 text-xs">
+        <h4 class="font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider text-[11px]">Thông Tin Hệ Thống</h4>
+        
+        <div class="flex items-center justify-between py-1 border-b border-slate-100 dark:border-slate-700/60">
+          <span class="text-slate-500">Bản đồ</span>
+          <span class="font-bold text-emerald-600"><i class="fa-brands fa-google"></i> Google Maps Engine</span>
+        </div>
+
+        <div class="flex items-center justify-between py-1 border-b border-slate-100 dark:border-slate-700/60">
+          <span class="text-slate-500">Cơ sở dữ liệu Firestore</span>
+          <span class="font-mono text-emerald-600 font-bold">baove-bb95b (Live)</span>
+        </div>
+
+        <div class="flex items-center justify-between py-1 border-b border-slate-100 dark:border-slate-700/60">
+          <span class="text-slate-500">Vị trí GPS</span>
+          <span id="scanner-gps-status" class="text-emerald-500 font-bold">Đang kiểm tra...</span>
+        </div>
+
+        <div class="pt-2 flex justify-between items-center">
+          <button id="btn-account-logout" class="w-full py-2.5 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-100 font-bold text-xs transition border border-rose-200">
+            <i class="fa-solid fa-right-from-bracket mr-1"></i> Đăng xuất khỏi tài khoản
+          </button>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+
+  <!-- ========================================== -->
+  <!-- MOBILE BOTTOM NAVIGATION FOR GUARDS        -->
+  <!-- ========================================== -->
+  <nav id="guard-bottom-nav" class="no-print fixed bottom-0 left-0 right-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200/90 dark:border-slate-800 safe-bottom">
+    <div class="max-w-md mx-auto grid grid-cols-4 py-1.5 px-2">
+      <button data-tab="home" class="bottom-nav-btn flex flex-col items-center justify-center py-1 rounded-xl text-blue-600 dark:text-blue-400 font-bold transition touch-target">
+        <i class="fa-solid fa-house-chimney text-lg mb-1"></i>
+        <span class="text-[11px]">Trang chủ</span>
+      </button>
+
+      <button data-tab="patrol" class="bottom-nav-btn flex flex-col items-center justify-center py-1 rounded-xl text-slate-400 dark:text-slate-500 transition touch-target">
+        <i class="fa-solid fa-route text-lg mb-1"></i>
+        <span class="text-[11px]">Tuần tra</span>
+      </button>
+
+      <button data-tab="shifts" class="bottom-nav-btn flex flex-col items-center justify-center py-1 rounded-xl text-slate-400 dark:text-slate-500 transition touch-target">
+        <i class="fa-solid fa-calendar-check text-lg mb-1"></i>
+        <span class="text-[11px]">Lịch trực</span>
+      </button>
+
+      <button data-tab="account" class="bottom-nav-btn flex flex-col items-center justify-center py-1 rounded-xl text-slate-400 dark:text-slate-500 transition touch-target">
+        <i class="fa-solid fa-user-shield text-lg mb-1"></i>
+        <span class="text-[11px]">Tài khoản</span>
+      </button>
+    </div>
+  </nav>
+
+  <button 
+    id="btn-floating-incident"
+    class="no-print fixed bottom-20 right-4 z-20 w-13 h-13 rounded-full bg-rose-600 hover:bg-rose-700 text-white shadow-xl shadow-rose-600/40 flex items-center justify-center text-xl active:scale-90 transition"
+    title="Báo sự cố khẩn cấp">
+    <i class="fa-solid fa-triangle-exclamation"></i>
+  </button>
+
+
+  <!-- ========================================== -->
+  <!-- VIEW 2: MOBILE DASHBOARD CHO QUẢN LÝ      -->
+  <!-- ========================================== -->
+  <section id="view-manager-mobile" class="hidden flex-1 max-w-lg w-full mx-auto p-3.5 space-y-4 pb-20 safe-bottom">
+    
+    <div class="bg-white dark:bg-slate-800 rounded-3xl p-4.5 border border-slate-200/80 dark:border-slate-700 shadow-xs space-y-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <span class="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+            BAN QUẢN LÝ / BGH
+          </span>
+          <h2 class="font-extrabold text-base text-slate-900 dark:text-white mt-1">Giám Sát Ca Trực Google Maps</h2>
+        </div>
+        <button id="btn-refresh-manager-mobile" class="w-9 h-9 rounded-xl bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200 flex items-center justify-center hover:bg-slate-200 transition">
+          <i class="fa-solid fa-arrows-rotate text-xs"></i>
+        </button>
+      </div>
+
+      <div>
+        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Lọc theo cơ sở</label>
+        <select id="manager-campus-filter" class="w-full px-3 py-2 rounded-xl text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-bold text-slate-700 dark:text-slate-200">
+          <option value="all">Tất cả các cơ sở NSG</option>
+          <option value="cs1">Cơ sở 1 - Quận 8 (47 Cao Lỗ)</option>
+          <option value="cs2">Cơ sở 2 - An Phú Tây (Bình Chánh)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- KPIs -->
+    <div class="grid grid-cols-2 gap-3">
+      <div class="bg-white dark:bg-slate-800 rounded-2xl p-3.5 border border-slate-200/80 dark:border-slate-700 shadow-xs flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center text-lg shrink-0">
+          <i class="fa-solid fa-users"></i>
+        </div>
+        <div>
+          <span class="text-[10px] font-bold text-slate-400 block uppercase">Đang trực</span>
+          <span id="mgr-on-duty-count" class="text-lg font-extrabold text-blue-600 font-mono">0/0</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-800 rounded-2xl p-3.5 border border-slate-200/80 dark:border-slate-700 shadow-xs flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-lg shrink-0">
+          <i class="fa-solid fa-route"></i>
+        </div>
+        <div>
+          <span class="text-[10px] font-bold text-slate-400 block uppercase">Tiến độ tuần tra</span>
+          <span id="mgr-patrol-percent" class="text-lg font-extrabold text-emerald-600 font-mono">0%</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-800 rounded-2xl p-3.5 border border-slate-200/80 dark:border-slate-700 shadow-xs flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center text-lg shrink-0">
+          <i class="fa-solid fa-triangle-exclamation"></i>
+        </div>
+        <div>
+          <span class="text-[10px] font-bold text-slate-400 block uppercase">Cảnh báo vị trí</span>
+          <span id="mgr-alerts-count" class="text-lg font-extrabold text-amber-500 font-mono">0</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-800 rounded-2xl p-3.5 border border-slate-200/80 dark:border-slate-700 shadow-xs flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center text-lg shrink-0">
+          <i class="fa-solid fa-bell"></i>
+        </div>
+        <div>
+          <span class="text-[10px] font-bold text-slate-400 block uppercase">Sự cố ghi nhận</span>
+          <span id="mgr-incidents-count" class="text-lg font-extrabold text-rose-600 font-mono">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Google Maps Card on Mobile -->
+    <div class="bg-white dark:bg-slate-800 rounded-3xl p-4 border border-slate-200/80 dark:border-slate-700 shadow-xs space-y-2">
+      <div class="flex items-center justify-between">
+        <h3 class="font-bold text-xs uppercase tracking-wider text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+          <i class="fa-brands fa-google text-blue-600"></i> Bản Đồ Google Maps Chốt Trực
+        </h3>
+        <div class="flex items-center gap-1.5">
+          <button id="btn-toggle-manager-map-type" class="px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-[10px] font-bold">
+            <i class="fa-solid fa-layer-group"></i> Vệ tinh
+          </button>
+          <button id="btn-manager-my-location" class="px-2 py-1 rounded-lg bg-blue-50 text-blue-600 dark:bg-slate-700 text-[10px] font-bold">
+            <i class="fa-solid fa-crosshairs"></i> Vị trí
+          </button>
+        </div>
+      </div>
+      <div id="manager-mobile-map" class="w-full h-60 rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 z-10"></div>
+    </div>
+
+    <!-- Active Guards List -->
+    <div class="space-y-2">
+      <div class="flex items-center justify-between px-1">
+        <h3 class="font-bold text-xs uppercase tracking-wider text-slate-500">Lực lượng bảo vệ phụ trách</h3>
+        <button onclick="window.managerMobileModule.openQuickAssignModal()" class="text-blue-600 dark:text-blue-400 font-bold text-xs flex items-center gap-1 hover:underline">
+          <i class="fa-solid fa-calendar-plus"></i> + Phân ca trực
+        </button>
+      </div>
+      <div id="manager-guard-cards-list" class="space-y-2.5"></div>
+    </div>
+
+    <!-- Fixed Shifts Roster for Mobile Managers -->
+    <div class="space-y-2 pt-2">
+      <div class="flex items-center justify-between px-1">
+        <div>
+          <h3 class="font-bold text-xs uppercase tracking-wider text-slate-500">Phân Công Ca Trực Cố Định</h3>
+          <p class="text-[10px] text-slate-400">Quản lý hoặc Super Admin trực tiếp đổi ca & cơ sở</p>
+        </div>
+        <button onclick="window.managerMobileModule.openQuickAssignModal()" class="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px] rounded-lg transition shadow-xs flex items-center gap-1">
+          <i class="fa-solid fa-user-clock"></i> Phân ca
+        </button>
+      </div>
+      <div id="manager-fixed-shifts-schedule" class="space-y-3"></div>
+    </div>
+
+    <!-- Live Warnings & Incident Feed -->
+    <div class="space-y-2 pt-2">
+      <h3 class="font-bold text-xs uppercase tracking-wider text-slate-500 px-1">Cảnh báo & Sự cố</h3>
+      <div id="manager-alerts-feed" class="space-y-2"></div>
+    </div>
+
+  </section>
+
+
+  <!-- ========================================== -->
+  <!-- VIEW 3: DESKTOP ADMIN (12 MODULE SIDEBAR)  -->
+  <!-- ========================================== -->
+  <section id="view-desktop-admin" class="hidden flex-1 flex w-full h-[calc(100vh-50px)] overflow-hidden">
+    
+    <aside class="w-64 bg-slate-900 text-slate-300 border-r border-slate-800 flex flex-col shrink-0 select-none">
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-base">
+            <i class="fa-solid fa-user-shield"></i>
+          </div>
+          <div>
+            <div class="font-bold text-xs text-white">Quản Trị Hệ Thống</div>
+            <div class="text-[10px] text-emerald-400">● Firestore Live</div>
+          </div>
+        </div>
+        <button id="btn-admin-logout" class="text-slate-400 hover:text-rose-400" title="Đăng xuất">
+          <i class="fa-solid fa-right-from-bracket"></i>
+        </button>
+      </div>
+
+      <nav class="flex-1 overflow-y-auto p-2 space-y-1 text-xs">
+        <button data-admin-module="dashboard" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-bold flex items-center gap-3 transition bg-blue-800 text-white">
+          <i class="fa-solid fa-chart-pie w-4 text-center"></i>
+          <span>1. Dashboard</span>
+        </button>
+
+        <button data-admin-module="campuses" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-school w-4 text-center"></i>
+          <span>2. Cơ sở</span>
+        </button>
+
+        <button data-admin-module="zones" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-building w-4 text-center"></i>
+          <span>3. Khu vực</span>
+        </button>
+
+        <button data-admin-module="staff" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-users-gear w-4 text-center"></i>
+          <span>4. Nhân sự</span>
+        </button>
+
+        <button data-admin-module="shifts" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-clock w-4 text-center"></i>
+          <span>5. Ca trực</span>
+        </button>
+
+        <button data-admin-module="roster" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-calendar-days w-4 text-center"></i>
+          <span>6. Phân công</span>
+        </button>
+
+        <button data-admin-module="checkpoints" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-qrcode w-4 text-center"></i>
+          <span>7. QR / GPS</span>
+        </button>
+
+        <button data-admin-module="patrol_logs" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-clipboard-check w-4 text-center"></i>
+          <span>8. Tuần tra</span>
+        </button>
+
+        <button data-admin-module="incidents" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-triangle-exclamation w-4 text-center"></i>
+          <span>9. Sự cố</span>
+        </button>
+
+        <button data-admin-module="reports" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-file-invoice w-4 text-center"></i>
+          <span>10. Báo cáo</span>
+        </button>
+
+        <button data-admin-module="settings" class="admin-nav-item w-full px-3 py-2.5 rounded-xl font-medium flex items-center gap-3 transition text-slate-300 hover:bg-slate-800">
+          <i class="fa-solid fa-sliders w-4 text-center"></i>
+          <span>11. Cấu hình</span>
+        </button>
+      </nav>
+
+      <div class="p-3 border-t border-slate-800 text-[11px] text-slate-500 text-center">
+        NSG SMART GUARD v2.2<br>
+        Nam Sai Gon Polytechnic
+      </div>
+    </aside>
+
+    <div class="flex-1 flex flex-col overflow-hidden bg-slate-100 dark:bg-slate-900">
+      <header class="h-14 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 flex items-center justify-between shrink-0">
+        <h2 id="admin-header-title" class="font-extrabold text-base text-slate-800 dark:text-slate-100">
+          Tổng Quan & Giám Sát Google Maps
+        </h2>
+        <div class="flex items-center gap-3">
+          <span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700 flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span> Firestore Trực Tuyến
+          </span>
+          <button onclick="window.adminModule.openAddCheckpointModal()" class="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition">
+            <i class="fa-solid fa-plus mr-1"></i> Thêm chốt Google Maps
+          </button>
+        </div>
+      </header>
+
+      <main id="admin-content-pane" class="flex-1 overflow-y-auto p-6"></main>
+    </div>
+
+  </section>
+
+
+  <!-- ========================================== -->
+  <!-- MODAL: LOGIN / XÁC THỰC TÀI KHOẢN         -->
+  <!-- ========================================== -->
+  <div id="login-auth-modal" class="hidden fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+    <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 max-w-sm w-full shadow-2xl border border-slate-200 dark:border-slate-800 text-center space-y-4">
+      <div class="w-16 h-16 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-3xl mx-auto shadow-lg shadow-blue-500/30">
+        <i class="fa-solid fa-shield-halved"></i>
+      </div>
+      <div>
+        <h3 class="font-extrabold text-xl text-slate-900 dark:text-white">NSG SMART GUARD</h3>
+        <p class="text-xs text-slate-500 mt-1">Đăng nhập tài khoản Firebase Authentication</p>
+      </div>
+
+      <form id="form-login-auth" class="space-y-3.5 text-left text-xs">
+        <div>
+          <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Email / Mã nhân viên</label>
+          <input type="text" id="login-identifier" value="trongnghia@nsg.edu.vn" placeholder="VD: trongnghia@nsg.edu.vn hoặc BV-01" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold" required>
+        </div>
+
+        <div>
+          <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Mật khẩu (Tối thiểu 6 ký tự)</label>
+          <input type="password" id="login-password" value="123456" minlength="6" placeholder="Mật khẩu của bạn" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs" required>
+        </div>
+
+        <button type="submit" id="btn-submit-login" class="w-full py-3.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-sm shadow-md transition">
+          <i class="fa-solid fa-right-to-bracket mr-1.5"></i> Đăng Nhập Hệ Thống
+        </button>
+
+        <div class="flex items-center justify-between text-[11px] pt-1">
+          <button type="button" onclick="window.sendResetPasswordPrompt()" class="text-blue-600 hover:underline">
+            Quên mật khẩu?
+          </button>
+          <span class="text-slate-400">NSG Security Portal</span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- ========================================== -->
+  <!-- FULLSCREEN QR SCANNER OVERLAY              -->
+  <!-- ========================================== -->
+  <div id="qr-scanner-overlay" class="hidden fixed inset-0 z-50 bg-black flex flex-col justify-between overflow-hidden">
+    
+    <div class="relative z-20 safe-top p-4 flex items-center justify-between text-white bg-gradient-to-b from-black/80 to-transparent">
+      <button id="btn-close-scanner" class="w-11 h-11 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center text-lg active:scale-90 transition">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+
+      <div class="flex flex-col items-center">
+        <div class="text-[10px] text-slate-400 uppercase tracking-widest font-bold">Xác Thực Chốt NSG</div>
+        <div id="scanner-gps-accuracy" class="text-xs font-semibold text-emerald-400 flex items-center gap-1">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span> GPS Đang Khóa...
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="btn-toggle-torch" class="w-11 h-11 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center text-lg active:scale-90 transition" title="Bật Flash">
+          <i class="fa-solid fa-bolt"></i>
+        </button>
+        <button id="btn-switch-camera" class="w-11 h-11 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center text-lg active:scale-90 transition" title="Đổi Cam">
+          <i class="fa-solid fa-camera-rotate"></i>
+        </button>
+      </div>
+    </div>
+
+    <div id="scanner-target-checkpoint-info" class="hidden relative z-20 mx-4 -mt-2"></div>
+
+    <div class="relative flex-1 flex items-center justify-center overflow-hidden">
+      <div id="qr-reader" class="w-full h-full object-cover"></div>
+
+      <div class="absolute w-72 h-72 pointer-events-none z-10">
+        <div class="absolute w-8 h-8 scanner-corner-tl"></div>
+        <div class="absolute w-8 h-8 scanner-corner-tr"></div>
+        <div class="absolute w-8 h-8 scanner-corner-bl"></div>
+        <div class="absolute w-8 h-8 scanner-corner-br"></div>
+        <div class="scanner-laser"></div>
+      </div>
+
+      <div id="scanner-camera-error" class="hidden absolute inset-0 z-30 flex items-center justify-center p-4"></div>
+    </div>
+
+    <div class="relative z-20 safe-bottom p-5 bg-gradient-to-t from-black/90 via-black/60 to-transparent flex flex-col items-center gap-3">
+      <div id="scanner-distance-badge" class="hidden"></div>
+      <div class="text-center text-slate-300 text-xs max-w-xs">
+        <i class="fa-solid fa-expand text-blue-400 mr-1"></i>
+        Hướng camera vào mã QR chốt tuần tra
+      </div>
+      <input type="file" id="qr-file-input" accept="image/*" class="hidden">
+      <button onclick="document.getElementById('qr-file-input').click()" class="text-xs text-blue-300 hover:text-white underline">
+        <i class="fa-solid fa-image mr-1"></i> Tải ảnh mã QR từ máy
+      </button>
+    </div>
+
+  </div>
+
+
+  <!-- ========================================== -->
+  <!-- MODAL: KẾT QUẢ QUÉT QR THÀNH CÔNG          -->
+  <!-- ========================================== -->
+  <div id="scan-result-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white dark:bg-slate-900 rounded-t-3xl sm:rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto border border-slate-200 dark:border-slate-800">
+      
+      <div class="text-center">
+        <div class="w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 dark:bg-emerald-950 dark:text-emerald-400 mx-auto flex items-center justify-center text-3xl mb-2 animate-bounce">
+          <i class="fa-solid fa-circle-check"></i>
+        </div>
+        <span class="px-3 py-1 rounded-full text-xs font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 uppercase tracking-wider">
+          XÁC THỰC THÀNH CÔNG
+        </span>
+        <h3 id="modal-cp-name" class="font-extrabold text-xl text-slate-900 dark:text-white mt-2 leading-tight">--</h3>
+        <p id="modal-campus-name" class="text-xs text-blue-600 dark:text-blue-400 font-bold mt-0.5">--</p>
+      </div>
+
+      <div class="bg-slate-50 dark:bg-slate-800/80 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-700 space-y-2 text-xs">
+        <div class="flex items-center justify-between">
+          <span class="text-slate-400">Khu vực / Tầng:</span>
+          <span id="modal-zone-floor" class="font-bold text-slate-800 dark:text-slate-100">--</span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span class="text-slate-400">Thời gian xác nhận:</span>
+          <span id="modal-scan-time" class="font-mono font-bold text-slate-800 dark:text-slate-100">--:--:--</span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span class="text-slate-400">Bảo vệ thực hiện:</span>
+          <span id="modal-guard-name" class="font-bold text-slate-800 dark:text-slate-100">--</span>
+        </div>
+      </div>
+
+      <div id="modal-gps-badge"></div>
+
+      <div class="space-y-2 pt-2">
+        <button id="btn-scan-continue" class="w-full py-3.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-sm shadow-md transition">
+          <i class="fa-solid fa-arrow-right mr-1.5"></i> Tiếp tục tuần tra
+        </button>
+        <button id="btn-scan-report-incident" class="w-full py-3 rounded-2xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 font-bold text-xs transition border border-rose-200 dark:border-rose-900">
+          <i class="fa-solid fa-triangle-exclamation mr-1.5"></i> Báo sự cố tại chốt này
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- ========================================== -->
+  <!-- MODAL: BÁO CÁO SỰ CỐ (INCIDENT REPORT)     -->
+  <!-- ========================================== -->
+  <div id="incident-form-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white dark:bg-slate-900 rounded-t-3xl sm:rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto border border-slate-200 dark:border-slate-800">
+      
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class="w-9 h-9 rounded-xl bg-rose-600 text-white flex items-center justify-center text-sm font-bold">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+          </div>
+          <div>
+            <h3 class="font-extrabold text-base text-slate-900 dark:text-white">Báo Cáo Sự Cố Mới</h3>
+            <div id="incident-gps-display" class="text-[10px] text-slate-400">Đang lấy tọa độ Google Maps...</div>
+          </div>
+        </div>
+        <button id="btn-close-incident-modal" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 hover:bg-slate-200">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <form id="incident-report-form" class="space-y-3.5">
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Loại sự cố</label>
+          <select id="incident-type" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-bold text-slate-800 dark:text-white">
+            <option value="door_lock">🚪 Cửa hỏng / Quên khóa phòng học</option>
+            <option value="fire_safety">🔥 PCCC / Nguy cơ cháy nổ</option>
+            <option value="security">⚠️ Mất an ninh trật tự / Xâm nhập</option>
+            <option value="equipment">⚡ Hỏng thiết bị điện nước / Rò rỉ</option>
+            <option value="property">📦 Tài sản khả nghi / Bỏ quên</option>
+            <option value="other">📌 Sự cố khác</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Vị trí chốt liên quan</label>
+          <select id="incident-checkpoint" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white"></select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Tiêu đề vắn tắt</label>
+          <input type="text" id="incident-title" placeholder="VD: Quên khóa cửa phòng B302" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white" required>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Chi tiết hiện trường</label>
+          <textarea id="incident-desc" rows="3" placeholder="Mô tả cụ thể hiện trường..." class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white"></textarea>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Ảnh minh chứng hiện trường</label>
+          <input type="file" id="incident-photo-input" accept="image/*" capture="environment" class="hidden">
+          
+          <div id="incident-upload-placeholder" onclick="document.getElementById('incident-photo-input').click()" class="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-4 text-center cursor-pointer hover:border-blue-500 transition">
+            <i class="fa-solid fa-camera text-2xl text-blue-600 dark:text-blue-400 mb-1"></i>
+            <p class="text-xs font-bold text-slate-700 dark:text-slate-200">Chụp ảnh bằng Camera</p>
+          </div>
+
+          <div id="incident-photo-preview" class="hidden relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 mt-2">
+            <img id="incident-preview-img" src="" class="w-full h-40 object-cover">
+            <button type="button" id="btn-remove-incident-photo" class="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/70 text-white flex items-center justify-center text-xs">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">Mức độ khẩn cấp</label>
+          <select id="incident-urgency" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-bold">
+            <option value="low">🟢 Mức độ thấp (Thông thường)</option>
+            <option value="medium" selected>🟡 Mức độ trung bình</option>
+            <option value="high">🟠 Ưu tiên cao</option>
+            <option value="critical">🔴 Khẩn cấp SOS</option>
+          </select>
+        </div>
+
+        <button type="submit" class="w-full py-3.5 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-sm shadow-md transition">
+          <i class="fa-solid fa-paper-plane mr-1.5"></i> Gửi Lên Firestore
+        </button>
+      </form>
+
+    </div>
+  </div>
+
+
+  <!-- ========================================== -->
+  <!-- MODAL: IMAGE VIEWER ENLARGED               -->
+  <!-- ========================================== -->
+  <div id="image-viewer-modal" class="hidden fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4" onclick="this.classList.add('hidden')">
+    <div class="relative max-w-2xl w-full">
+      <img id="image-viewer-img" src="" class="w-full max-h-[85vh] object-contain rounded-2xl shadow-2xl">
+      <button class="absolute -top-10 right-0 text-white text-2xl font-bold">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+  </div>
+
+
+  <!-- ========================================== -->
+  <!-- APPLICATION SCRIPTS (ES MODULES)           -->
+  <!-- ========================================== -->
+  <script type="module" src="./js/storage.js"></script>
+  <script type="module" src="./js/firebase-config.js"></script>
+  <script type="module" src="./js/qr-scanner.js"></script>
+  <script type="module" src="./js/patrol.js"></script>
+  <script type="module" src="./js/incident.js"></script>
+  <script type="module" src="./js/handover.js"></script>
+  <script type="module" src="./js/manager-mobile.js"></script>
+  <script type="module" src="./js/admin.js"></script>
+  <script type="module" src="./js/app.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1d4ed8" />
+      <stop offset="50%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#4f46e5" />
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.25" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.05" />
+    </linearGradient>
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#0f172a" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Rounded App Background -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+  
+  <!-- Subtle inner glowing ring -->
+  <rect x="24" y="24" width="464" height="464" rx="92" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="4" />
+
+  <!-- Central Shield / Badge -->
+  <g filter="url(#dropShadow)">
+    <path d="M256 80 L390 135 C390 260 256 360 256 360 C256 360 122 260 122 135 Z" fill="url(#shieldGrad)" stroke="#ffffff" stroke-width="6" stroke-linejoin="round" />
+  </g>
+
+  <!-- Wrench and Screwdriver / Gear Maintenance Tools Icon -->
+  <!-- Gear -->
+  <g transform="translate(256, 210) scale(1.15)">
+    <!-- Main Wrench -->
+    <path d="M-30,-60 L-10,-40 L25,-75 C35,-65 38,-45 28,-35 L-5,-2 L2,-2 C12,12 30,35 60,70 C65,76 62,85 54,88 C46,91 38,87 32,80 L0,38 L-35,68 C-45,58 -45,45 -35,35 L-10,12 L-42,-20 C-50,-28 -50,-42 -40,-52 Z" fill="#ffffff" />
+    <!-- Checkmark Badge on tools -->
+    <circle cx="28" cy="28" r="34" fill="#22c55e" stroke="#ffffff" stroke-width="5" />
+    <path d="M16 28 L24 36 L40 18" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+
+  <!-- NSG Banner Text -->
+  <rect x="136" y="400" width="240" height="52" rx="26" fill="#ffffff" />
+  <text x="256" y="436" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="900" fill="#1d4ed8" text-anchor="middle" letter-spacing="3">BẢO TRÌ NSG</text>
+</svg>

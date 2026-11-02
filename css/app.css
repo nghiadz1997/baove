@@ -1,0 +1,174 @@
+/* NSG SMART GUARD Custom Styles & Design System */
+
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  
+  --primary: #1e40af;
+  --primary-hover: #1d4ed8;
+  --primary-light: #eff6ff;
+  --accent-cyan: #0284c7;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+}
+
+/* Ensure no horizontal overflowing on any screen */
+html, body {
+  width: 100%;
+  max-width: 100vw;
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Safe area support for iPhone notch & home indicator */
+.safe-top {
+  padding-top: max(12px, var(--sat));
+}
+
+.safe-bottom {
+  padding-bottom: max(12px, var(--sab));
+}
+
+.safe-bottom-nav {
+  padding-bottom: max(68px, calc(56px + var(--sab)));
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #475569;
+}
+
+/* Pulse animation for Live GPS */
+@keyframes gps-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
+.gps-live-dot {
+  animation: gps-pulse 2s infinite;
+}
+
+/* QR Scanner Laser Animation */
+@keyframes scan-laser {
+  0% {
+    top: 5%;
+    opacity: 0.8;
+  }
+  50% {
+    top: 92%;
+    opacity: 1;
+  }
+  100% {
+    top: 5%;
+    opacity: 0.8;
+  }
+}
+
+.scanner-laser {
+  position: absolute;
+  left: 5%;
+  right: 5%;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, #38bdf8, #60a5fa, #38bdf8, transparent);
+  box-shadow: 0 0 12px #38bdf8, 0 0 24px #0284c7;
+  animation: scan-laser 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  z-index: 15;
+}
+
+/* Scanner target box corner marks */
+.scanner-corner-tl {
+  top: 0;
+  left: 0;
+  border-top: 4px solid #38bdf8;
+  border-left: 4px solid #38bdf8;
+  border-top-left-radius: 12px;
+}
+.scanner-corner-tr {
+  top: 0;
+  right: 0;
+  border-top: 4px solid #38bdf8;
+  border-right: 4px solid #38bdf8;
+  border-top-right-radius: 12px;
+}
+.scanner-corner-bl {
+  bottom: 0;
+  left: 0;
+  border-bottom: 4px solid #38bdf8;
+  border-left: 4px solid #38bdf8;
+  border-bottom-left-radius: 12px;
+}
+.scanner-corner-br {
+  bottom: 0;
+  right: 0;
+  border-bottom: 4px solid #38bdf8;
+  border-right: 4px solid #38bdf8;
+  border-bottom-right-radius: 12px;
+}
+
+/* Glassmorphism helpers */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.dark .glass-panel {
+  background: rgba(15, 23, 42, 0.85);
+}
+
+.glass-dark {
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+/* Big touch target utility */
+.touch-target {
+  min-height: 48px;
+  min-width: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Print Stylesheet for Printable QR codes & Reports */
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  .no-print, header, nav, #bottomNav, #toast-container, .role-selector-bar {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .printable-qr-card {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    border: 2px dashed #94a3b8;
+    margin-bottom: 20px;
+    padding: 16px;
+  }
+}
