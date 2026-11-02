@@ -623,14 +623,11 @@ export async function verifyAndRecordPatrolCloud(scanData) {
       gpsStatus = 'warning_far';
     }
   } else {
-    if (settings.requireGpsForScan) {
-      return {
-        success: false,
-        code: 'GPS_REQUIRED',
-        message: 'Bắt buộc phải bật định vị Google Maps GPS để xác thực việc có mặt tại chốt!'
-      };
-    }
-    gpsStatus = 'no_gps';
+    return {
+      success: false,
+      code: 'GPS_REQUIRED',
+      message: 'Bắt buộc phải bật định vị Google Maps GPS để xác thực việc có mặt tại chốt! Vui lòng cho phép quyền vị trí trên điện thoại.'
+    };
   }
 
   const logEntry = {
