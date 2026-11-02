@@ -82,7 +82,11 @@ class PatrolModule {
     const recentLog = logs.find(log => {
       if (log.checkpointId !== checkpointId) return false;
       const logDate = new Date(log.scannedAt);
-      return logDate >= shiftStart && logDate < shiftEnd;
+      const isWithinShift = logDate >= shiftStart && logDate < shiftEnd;
+      // Only count scans strictly within the 20m perimeter
+      const isWithin20m = log.distanceMeters === null || log.distanceMeters <= 20;
+      const isValidStatus = log.verificationStatus !== 'flagged_gps_distance';
+      return isWithinShift && isWithin20m && isValidStatus;
     });
 
     return recentLog ? { checked: true, log: recentLog } : { checked: false, log: null };

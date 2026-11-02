@@ -60,7 +60,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <!-- Custom App Styles -->
-  <link rel="stylesheet" href="./css/app.css">
+  <link rel="stylesheet" href="./css/app.css?v=2.5.0">
 </head>
 
 <body class="bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 min-h-screen flex flex-col font-sans select-none antialiased">
@@ -887,15 +887,24 @@
   <!-- ========================================== -->
   <!-- APPLICATION SCRIPTS (ES MODULES)           -->
   <!-- ========================================== -->
-  <script type="module" src="./js/storage.js"></script>
-  <script type="module" src="./js/firebase-config.js"></script>
-  <script type="module" src="./js/qr-scanner.js"></script>
-  <script type="module" src="./js/patrol.js"></script>
-  <script type="module" src="./js/incident.js"></script>
-  <script type="module" src="./js/handover.js"></script>
-  <script type="module" src="./js/manager-mobile.js"></script>
-  <script type="module" src="./js/admin.js"></script>
-  <script type="module" src="./js/app.js"></script>
+  <script type="module" src="./js/storage.js?v=2.5.0"></script>
+  <script type="module" src="./js/firebase-config.js?v=2.5.0"></script>
+  <script type="module" src="./js/qr-scanner.js?v=2.5.0"></script>
+  <script type="module" src="./js/patrol.js?v=2.5.0"></script>
+  <script type="module" src="./js/incident.js?v=2.5.0"></script>
+  <script type="module" src="./js/handover.js?v=2.5.0"></script>
+  <script type="module" src="./js/manager-mobile.js?v=2.5.0"></script>
+  <script type="module" src="./js/admin.js?v=2.5.0"></script>
+  <script type="module" src="./js/app.js?v=2.5.0"></script>
 
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        for (let reg of regs) {
+          reg.update();
+        }
+      });
+    }
+  </script>
 </body>
 </html>

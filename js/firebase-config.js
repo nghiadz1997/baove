@@ -606,7 +606,6 @@ export async function verifyAndRecordPatrolCloud(scanData) {
   }
 
   let distanceMeters = null;
-  const maxAllowed = checkpoint.allowedRadius || settings.maxGpsRadiusMeters || 20;
 
   // 1. Strict GPS requirement: Guard MUST provide real GPS coordinates
   if (!userLocation || !userLocation.lat || !userLocation.lng) {
@@ -619,28 +618,35 @@ export async function verifyAndRecordPatrolCloud(scanData) {
   }
 
   // 2. Strict Distance enforcement: Guard MUST be within 20m from checkpoint coordinates
-  if (checkpoint.lat && checkpoint.lng) {
-    distanceMeters = calculateHaversineDistance(
-      userLocation.lat,
-      userLocation.lng,
-      checkpoint.lat,
-      checkpoint.lng
-    );
+  // Resolve checkpoint coordinates with guaranteed fallback to campus GPS (Trụ sở chính 47 Cao Lỗ)
+  const campuses = storage.getCampuses();
+  const campus = (Array.isArray(campuses) && campuses.find(c => c.name === checkpoint.campusName || c.id === checkpoint.campusId)) 
+                 || OFFICIAL_CAMPUSES[0];
 
-    const distRounded = Math.round(distanceMeters);
+  const targetLat = parseFloat(checkpoint.lat || campus?.lat || 10.735768115549721);
+  const targetLng = parseFloat(checkpoint.lng || campus?.lng || 106.68071864291426);
+  const maxAllowed = Math.min(parseFloat(checkpoint.allowedRadius) || 20, 20);
 
-    // REJECT scan if outside 20m
-    if (distanceMeters > maxAllowed) {
-      console.warn(`Patrol rejected: Out of perimeter (${distRounded}m > ${maxAllowed}m) at ${checkpoint.name}`);
-      return {
-        success: false,
-        code: 'OUT_OF_RANGE',
-        checkpoint: checkpoint,
-        distanceMeters: distRounded,
-        allowedRadius: maxAllowed,
-        message: `Bạn đang ở ngoài khu vực có mã QR (Khoảng cách hiện tại: ${distRounded}m > ${maxAllowed}m). Bắt buộc phải di chuyển vào phạm vi trong vòng ${maxAllowed}m mới được quét mã!`
-      };
-    }
+  distanceMeters = calculateHaversineDistance(
+    parseFloat(userLocation.lat),
+    parseFloat(userLocation.lng),
+    targetLat,
+    targetLng
+  );
+
+  const distRounded = Math.round(distanceMeters);
+
+  // REJECT scan if outside 20m!
+  if (distanceMeters > maxAllowed) {
+    console.warn(`Patrol rejected: Out of perimeter (${distRounded}m > ${maxAllowed}m) at ${checkpoint.name}`);
+    return {
+      success: false,
+      code: 'OUT_OF_RANGE',
+      checkpoint: checkpoint,
+      distanceMeters: distRounded,
+      allowedRadius: maxAllowed,
+      message: `Bạn đang ở ngoài khu vực có mã QR (Khoảng cách hiện tại: ${distRounded}m > ${maxAllowed}m). Bắt buộc phải di chuyển vào phạm vi trong vòng ${maxAllowed}m mới được quét mã!`
+    };
   }
 
   const logEntry = {
@@ -689,11 +695,19 @@ export async function verifyAndRecordPatrolCloud(scanData) {
 }
 
 export function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+  const pLat1 = parseFloat(lat1);
+  const pLon1 = parseFloat(lon1);
+  const pLat2 = parseFloat(lat2);
+  const pLon2 = parseFloat(lon2);
+  if (isNaN(pLat1) || isNaN(pLon1) || isNaN(pLat2) || isNaN(pLon2)) {
+    console.warn("Invalid coordinates in calculateHaversineDistance:", { lat1, lon1, lat2, lon2 });
+    return 999999;
+  }
   const R = 6371e3;
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+  const φ1 = (pLat1 * Math.PI) / 180;
+  const φ2 = (pLat2 * Math.PI) / 180;
+  const Δφ = ((pLat2 - pLat1) * Math.PI) / 180;
+  const Δλ = ((pLon2 - pLon1) * Math.PI) / 180;
 
   const a =
     Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +

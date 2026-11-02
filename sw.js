@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nsg-guard-v1.0.0';
+const CACHE_NAME = 'nsg-guard-v2.5.0';
 const STATIC_ASSETS = [
   './',
   './index.html',
@@ -27,6 +27,7 @@ self.addEventListener('activate', (event) => {
       return Promise.all(
         keys.map((key) => {
           if (key !== CACHE_NAME) {
+            console.log('Purging legacy cache:', key);
             return caches.delete(key);
           }
         })
@@ -43,10 +44,33 @@ self.addEventListener('fetch', (event) => {
   if (url.protocol.startsWith('chrome-extension')) return;
   if (url.hostname.includes('firebase') || url.hostname.includes('googleapis')) return;
 
+  // NETWORK-FIRST for all HTML, JS, and navigation requests to prevent stale cache bugs
+  const isCodeAsset = event.request.mode === 'navigate' || 
+                      url.pathname.endsWith('.html') || 
+                      url.pathname.endsWith('.js') ||
+                      url.search.includes('v=');
+
+  if (isCodeAsset) {
+    event.respondWith(
+      fetch(event.request)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return networkResponse;
+        })
+        .catch(() => {
+          return caches.match(event.request).then((cached) => cached || caches.match('./index.html'));
+        })
+    );
+    return;
+  }
+
+  // STALE-WHILE-REVALIDATE for media/static icons
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       if (cachedResponse) {
-        // Return cache but update in background
         fetch(event.request)
           .then((networkResponse) => {
             if (networkResponse && networkResponse.status === 200) {
@@ -58,11 +82,7 @@ self.addEventListener('fetch', (event) => {
           .catch(() => {});
         return cachedResponse;
       }
-      return fetch(event.request).catch(() => {
-        if (event.request.mode === 'navigate') {
-          return caches.match('./index.html');
-        }
-      });
+      return fetch(event.request);
     })
   );
 });
