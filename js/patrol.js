@@ -207,7 +207,7 @@ class PatrolModule {
                         <i class="fa-solid fa-diamond-turn-right text-xs"></i> Google Maps
                       </a>
                     ` : ''}
-                    <span class="text-[10px] text-slate-400 font-mono">Bán kính: ≤${cp.allowedRadius || 50}m</span>
+                    <span class="text-[10px] text-slate-400 font-mono">Bán kính: ≤${cp.allowedRadius || 20}m</span>
                   </div>
 
                   ${checked && log ? `

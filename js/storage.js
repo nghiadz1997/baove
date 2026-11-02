@@ -96,7 +96,7 @@ export const DEFAULT_SHIFTS = [
 ];
 
 export const DEFAULT_SETTINGS = {
-  maxGpsRadiusMeters: 50,
+  maxGpsRadiusMeters: 20, // Mandatory max 20m from QR checkpoint
   enableSoundFeedback: true,
   enableHapticVibration: true,
   scanCooldownSeconds: 5,
@@ -239,7 +239,20 @@ class LocalStorageManager {
 
   // Checkpoints
   getCheckpoints() {
-    return this.get(STORAGE_KEYS.CHECKPOINTS_CACHE, []);
+    let list = this.get(STORAGE_KEYS.CHECKPOINTS_CACHE, []);
+    let needsUpdate = false;
+    list = list.map(cp => {
+      // Enforce 20m radius limit requested by user
+      if (!cp.allowedRadius || cp.allowedRadius > 20) {
+        needsUpdate = true;
+        return { ...cp, allowedRadius: 20 };
+      }
+      return cp;
+    });
+    if (needsUpdate) {
+      this.saveCheckpoints(list);
+    }
+    return list;
   }
 
   saveCheckpoints(list) {
@@ -346,7 +359,12 @@ class LocalStorageManager {
 
   // Settings
   getSettings() {
-    return this.get(STORAGE_KEYS.SETTINGS_CACHE, DEFAULT_SETTINGS);
+    const s = this.get(STORAGE_KEYS.SETTINGS_CACHE, DEFAULT_SETTINGS);
+    if (!s.maxGpsRadiusMeters || s.maxGpsRadiusMeters > 20) {
+      s.maxGpsRadiusMeters = 20;
+      this.saveSettings(s);
+    }
+    return s;
   }
 
   saveSettings(settings) {

@@ -218,14 +218,14 @@ class QRScannerManager {
           this.targetCheckpoint.lng
         );
         const distRounded = Math.round(d);
-        const maxRadius = this.targetCheckpoint.allowedRadius || 50;
+        const maxRadius = this.targetCheckpoint.allowedRadius || 20;
         const isValid = distRounded <= maxRadius;
 
         distEl.classList.remove('hidden');
         distEl.innerHTML = `
-          <div class="px-3 py-1.5 rounded-full ${isValid ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'} flex items-center gap-1.5 text-xs font-medium backdrop-blur-md">
-            <i class="fa-solid fa-location-crosshairs"></i>
-            <span>Khoảng cách đến điểm: <strong>${distRounded}m</strong> (${isValid ? 'Hợp lệ ≤ ' + maxRadius + 'm' : 'Quá xa > ' + maxRadius + 'm'})</span>
+          <div class="px-3.5 py-1.5 rounded-full ${isValid ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-rose-500/30 text-rose-200 border border-rose-500/70 animate-pulse'} flex items-center gap-1.5 text-xs font-semibold backdrop-blur-md">
+            <i class="fa-solid ${isValid ? 'fa-circle-check text-emerald-400' : 'fa-circle-xmark text-rose-400'}"></i>
+            <span>Khoảng cách: <strong>${distRounded}m</strong> (${isValid ? 'Hợp lệ ≤ ' + maxRadius + 'm' : 'Ngoài khu vực > ' + maxRadius + 'm - Không thể quét'})</span>
           </div>
         `;
       } else if (distEl) {
@@ -468,7 +468,7 @@ class QRScannerManager {
               <div class="text-[11px] text-slate-300">${this.targetCheckpoint.campusName} • ${this.targetCheckpoint.zoneName} (${this.targetCheckpoint.floor})</div>
             </div>
             <div class="text-right">
-              <span class="px-2 py-0.5 rounded bg-blue-500/30 text-blue-200 text-[10px] font-mono">Bán kính ≤${this.targetCheckpoint.allowedRadius}m</span>
+              <span class="px-2 py-0.5 rounded bg-blue-500/30 text-blue-200 text-[10px] font-mono">Bán kính ≤${this.targetCheckpoint.allowedRadius || 20}m</span>
             </div>
           </div>
         `;
@@ -737,7 +737,67 @@ class QRScannerManager {
   }
 
   showErrorModal(result) {
-    alert(`❌ TỪ CHỐI XÁC THỰC:\n\n${result.message}`);
+    const existing = document.getElementById('modal-scan-rejected');
+    if (existing) existing.remove();
+
+    const isOutOfRange = result.code === 'OUT_OF_RANGE';
+    const title = isOutOfRange ? 'NGOÀI KHU VỰC CÓ MÃ QR' : 'TỪ CHỐI XÁC THỰC QUÉT';
+    const distStr = result.distanceMeters !== undefined ? `${result.distanceMeters}m` : null;
+    const allowed = result.allowedRadius || 20;
+
+    const modalHtml = `
+      <div id="modal-scan-rejected" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in zoom-in-95 duration-200">
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-sm w-full shadow-2xl border border-rose-500/40 space-y-4">
+          <div class="text-center space-y-2">
+            <div class="w-16 h-16 mx-auto rounded-3xl bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400 flex items-center justify-center text-3xl shadow-inner">
+              <i class="fa-solid fa-ban"></i>
+            </div>
+            <span class="px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-200">
+              KHÔNG ĐƯỢC PHÉP QUÉT
+            </span>
+            <h3 class="font-extrabold text-base text-slate-900 dark:text-white">
+              ${title}
+            </h3>
+          </div>
+
+          ${isOutOfRange && distStr ? `
+            <div class="p-4 bg-rose-50 dark:bg-rose-950/40 rounded-2xl border border-rose-200 dark:border-rose-900 text-center space-y-1.5">
+              <div class="text-[11px] text-rose-600 dark:text-rose-400 font-bold uppercase">Khoảng cách thực tế từ GPS của bạn:</div>
+              <div class="text-3xl font-black text-rose-600 dark:text-rose-400 font-mono tracking-tight">
+                ${distStr}
+              </div>
+              <div class="text-xs text-rose-700 dark:text-rose-300 font-medium">
+                Vượt quá khoảng cách cho phép (Phải có mặt trong vòng <strong>≤ ${allowed}m</strong>)
+              </div>
+            </div>
+          ` : ''}
+
+          <div class="text-xs text-slate-600 dark:text-slate-300 leading-relaxed bg-slate-50 dark:bg-slate-800/60 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700">
+            ${result.message || 'Lượt quét không hợp lệ hoặc không đúng vị trí.'}
+          </div>
+
+          <div class="pt-1 flex flex-col gap-2">
+            <button id="btn-retry-scan-after-error" class="w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs shadow-md shadow-blue-500/20 active:scale-95 transition flex items-center justify-center gap-1.5">
+              <i class="fa-solid fa-arrows-rotate"></i> Tôi đã đến gần chốt (≤ 20m) - Quét lại
+            </button>
+            <button onclick="document.getElementById('modal-scan-rejected').remove(); window.scannerManager.closeScanner();" class="w-full py-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold text-xs transition">
+              Đóng máy quét
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    document.getElementById('btn-retry-scan-after-error')?.addEventListener('click', () => {
+      document.getElementById('modal-scan-rejected')?.remove();
+      if (this.html5QrCode && this.isScanning) {
+        try {
+          this.html5QrCode.resume();
+        } catch(e) {}
+      }
+    });
   }
 }
 

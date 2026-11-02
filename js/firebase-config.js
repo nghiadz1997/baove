@@ -606,10 +606,20 @@ export async function verifyAndRecordPatrolCloud(scanData) {
   }
 
   let distanceMeters = null;
-  let isGpsValid = true;
-  let gpsStatus = 'valid';
+  const maxAllowed = checkpoint.allowedRadius || settings.maxGpsRadiusMeters || 20;
 
-  if (userLocation && userLocation.lat && userLocation.lng) {
+  // 1. Strict GPS requirement: Guard MUST provide real GPS coordinates
+  if (!userLocation || !userLocation.lat || !userLocation.lng) {
+    return {
+      success: false,
+      code: 'GPS_REQUIRED',
+      checkpoint: checkpoint,
+      message: 'Bắt buộc phải bật định vị Google Maps GPS để xác thực việc có mặt tại chốt! Vui lòng cho phép quyền vị trí trên điện thoại.'
+    };
+  }
+
+  // 2. Strict Distance enforcement: Guard MUST be within 20m from checkpoint coordinates
+  if (checkpoint.lat && checkpoint.lng) {
     distanceMeters = calculateHaversineDistance(
       userLocation.lat,
       userLocation.lng,
@@ -617,17 +627,20 @@ export async function verifyAndRecordPatrolCloud(scanData) {
       checkpoint.lng
     );
 
-    const maxAllowed = checkpoint.allowedRadius || settings.maxGpsRadiusMeters || 50;
+    const distRounded = Math.round(distanceMeters);
+
+    // REJECT scan if outside 20m
     if (distanceMeters > maxAllowed) {
-      isGpsValid = false;
-      gpsStatus = 'warning_far';
+      console.warn(`Patrol rejected: Out of perimeter (${distRounded}m > ${maxAllowed}m) at ${checkpoint.name}`);
+      return {
+        success: false,
+        code: 'OUT_OF_RANGE',
+        checkpoint: checkpoint,
+        distanceMeters: distRounded,
+        allowedRadius: maxAllowed,
+        message: `Bạn đang ở ngoài khu vực có mã QR (Khoảng cách hiện tại: ${distRounded}m > ${maxAllowed}m). Bắt buộc phải di chuyển vào phạm vi trong vòng ${maxAllowed}m mới được quét mã!`
+      };
     }
-  } else {
-    return {
-      success: false,
-      code: 'GPS_REQUIRED',
-      message: 'Bắt buộc phải bật định vị Google Maps GPS để xác thực việc có mặt tại chốt! Vui lòng cho phép quyền vị trí trên điện thoại.'
-    };
   }
 
   const logEntry = {
@@ -643,12 +656,12 @@ export async function verifyAndRecordPatrolCloud(scanData) {
     shiftId: shift?.id || 'default',
     shiftName: shift?.name || 'Ca trực hiện tại',
     scannedAt: new Date().toISOString(),
-    distanceMeters: distanceMeters ? Math.round(distanceMeters * 10) / 10 : null,
+    distanceMeters: distanceMeters !== null ? Math.round(distanceMeters * 10) / 10 : null,
     accuracy: userLocation?.accuracy ? Math.round(userLocation.accuracy) : null,
     guardCoordinates: userLocation ? { lat: userLocation.lat, lng: userLocation.lng } : null,
-    gpsStatus: gpsStatus,
-    verificationStatus: isGpsValid ? 'verified_cloud' : 'flagged_gps_distance',
-    notes: isGpsValid ? 'Đã kiểm tra an toàn' : `Cảnh báo GPS: ${Math.round(distanceMeters)}m (Vượt mức cho phép ${checkpoint.allowedRadius || 50}m)`
+    gpsStatus: 'valid',
+    verificationStatus: 'verified_cloud',
+    notes: `Đã kiểm tra an toàn tại vị trí chốt (Cách ${Math.round(distanceMeters || 0)}m ≤ ${maxAllowed}m)`
   };
 
   storage.addPatrolLog({ id: 'log-' + Date.now(), ...logEntry });
@@ -666,14 +679,12 @@ export async function verifyAndRecordPatrolCloud(scanData) {
 
   return {
     success: true,
-    code: isGpsValid ? 'SUCCESS' : 'WARNING_DISTANCE',
+    code: 'SUCCESS',
     data: logEntry,
     checkpoint: checkpoint,
     distanceMeters: logEntry.distanceMeters,
-    isGpsValid: isGpsValid,
-    message: isGpsValid 
-      ? `Xác thực thành công chốt ${checkpoint.name}` 
-      : `Đã ghi nhận quét chốt nhưng GPS cách ${logEntry.distanceMeters}m (Vượt mức cho phép). Đã gắn cờ cảnh báo!`
+    isGpsValid: true,
+    message: `Xác thực thành công chốt ${checkpoint.name} (Khoảng cách: ${logEntry.distanceMeters}m ≤ ${maxAllowed}m)!`
   };
 }
 

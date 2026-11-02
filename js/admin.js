@@ -931,7 +931,7 @@ class AdminDesktopModule {
                   <td class="p-3 font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-200">
                     ${cp.lat ? cp.lat.toFixed(5) : '—'}, ${cp.lng ? cp.lng.toFixed(5) : '—'}
                   </td>
-                  <td class="p-3 font-bold text-slate-700 dark:text-slate-300">≤ ${cp.allowedRadius || 50}m</td>
+                  <td class="p-3 font-bold text-slate-700 dark:text-slate-300">≤ ${cp.allowedRadius || 20}m</td>
                   <td class="p-3">
                     ${cp.lat && cp.lng ? `
                       <a href="https://www.google.com/maps?q=${cp.lat},${cp.lng}" target="_blank" class="text-blue-600 font-bold hover:underline">
@@ -999,7 +999,7 @@ class AdminDesktopModule {
               </div>
               <div>
                 <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Bán kính quét cho phép (m) *</label>
-                <input type="number" id="edit-cp-radius" value="${cp.allowedRadius || 50}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800" required>
+                <input type="number" id="edit-cp-radius" value="${cp.allowedRadius || 20}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800" required>
               </div>
             </div>
 
@@ -1088,7 +1088,7 @@ class AdminDesktopModule {
       e.preventDefault();
       const name = document.getElementById('edit-cp-name').value.trim();
       const code = document.getElementById('edit-cp-code').value.trim().toUpperCase();
-      const allowedRadius = parseInt(document.getElementById('edit-cp-radius').value, 10) || 50;
+      const allowedRadius = parseInt(document.getElementById('edit-cp-radius').value, 10) || 20;
       const zoneName = document.getElementById('edit-cp-zone').value.trim();
       const floor = document.getElementById('edit-cp-floor').value.trim();
       const lat = parseFloat(document.getElementById('edit-cp-lat').value);
@@ -1161,7 +1161,7 @@ class AdminDesktopModule {
               </div>
               <div>
                 <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Bán kính quét cho phép (m) *</label>
-                <input type="number" id="cp-radius" value="35" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800" required>
+                <input type="number" id="cp-radius" value="20" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800" required>
               </div>
             </div>
 
@@ -1242,7 +1242,7 @@ class AdminDesktopModule {
       e.preventDefault();
       const name = document.getElementById('cp-name').value.trim();
       const code = document.getElementById('cp-code').value.trim().toUpperCase();
-      const allowedRadius = parseInt(document.getElementById('cp-radius').value, 10) || 35;
+      const allowedRadius = parseInt(document.getElementById('cp-radius').value, 10) || 20;
       const zoneName = document.getElementById('cp-zone').value.trim() || 'Khu A';
       const floor = document.getElementById('cp-floor').value.trim() || 'Trệt';
       const lat = parseFloat(document.getElementById('cp-lat').value);
@@ -2403,7 +2403,7 @@ class AdminDesktopModule {
         <div class="space-y-3 text-xs">
           <div>
             <label class="block font-bold mb-1">Bán kính GPS tối đa cho phép (Mét)</label>
-            <input type="number" id="setting-gps-radius" value="${settings.maxGpsRadiusMeters || 50}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
+            <input type="number" id="setting-gps-radius" value="${settings.maxGpsRadiusMeters || 20}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
           </div>
           <div>
             <label class="block font-bold mb-1">Thời gian giãn cách quét tối thiểu (Giây)</label>
@@ -2418,7 +2418,7 @@ class AdminDesktopModule {
   }
 
   saveSystemSettings() {
-    const radius = parseInt(document.getElementById('setting-gps-radius').value, 10) || 50;
+    const radius = parseInt(document.getElementById('setting-gps-radius').value, 10) || 20;
     const cooldown = parseInt(document.getElementById('setting-cooldown').value, 10) || 5;
     storage.saveSettings({ ...storage.getSettings(), maxGpsRadiusMeters: radius, scanCooldownSeconds: cooldown });
     alert('✅ Đã lưu cấu hình an ninh!');
