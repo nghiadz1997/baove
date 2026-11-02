@@ -4,6 +4,7 @@
   "description": "NSG SMART GUARD - Hệ thống quản lý tuần tra & an ninh Mobile First cho Trường Cao đẳng Nam Sài Gòn",
   "main": "server.js",
   "scripts": {
+    "build": "echo 'Static build ready'",
     "start": "node server.js",
     "dev": "node server.js"
   },
