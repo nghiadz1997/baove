@@ -12,6 +12,8 @@ export const STORAGE_KEYS = {
   SHIFTS_CACHE: 'nsg_guard_shifts_cache',
   USERS_CACHE: 'nsg_guard_users_cache',
   PATROL_LOGS_CACHE: 'nsg_guard_patrol_logs_cache',
+  DUTY_SESSIONS_CACHE: 'nsg_guard_duty_sessions_cache',
+  DUTY_AUDIT_LOGS_CACHE: 'nsg_guard_duty_audit_logs_cache',
   INCIDENTS_CACHE: 'nsg_guard_incidents_cache',
   HANDOVERS_CACHE: 'nsg_guard_handovers_cache',
   SETTINGS_CACHE: 'nsg_guard_settings_cache',
@@ -107,6 +109,7 @@ export const DEFAULT_SETTINGS = {
   scanCooldownSeconds: 5,
   requireGpsForScan: true,
   allowOfflineScan: true,
+  allowPatrolWithoutCheckIn: false, // Bắt buộc đã nhận ca (Active Duty Session) mới được ghi nhận hoàn thành tuần tra chính thức
   mapType: 'google_roadmap' // 'google_roadmap' | 'google_satellite' | 'google_hybrid'
 };
 
@@ -353,6 +356,46 @@ class LocalStorageManager {
     const list = this.getHandovers();
     list.unshift(handover);
     this.saveHandovers(list);
+    return list;
+  }
+
+  // Smart Check-in: Duty Sessions
+  getDutySessions() {
+    const list = this.get(STORAGE_KEYS.DUTY_SESSIONS_CACHE, []);
+    return Array.isArray(list) ? list : [];
+  }
+
+  saveDutySessions(list) {
+    this.set(STORAGE_KEYS.DUTY_SESSIONS_CACHE, Array.isArray(list) ? list : []);
+  }
+
+  upsertDutySession(session) {
+    if (!session || !session.id) return this.getDutySessions();
+    const list = this.getDutySessions();
+    const idx = list.findIndex(s => s.id === session.id);
+    if (idx !== -1) {
+      list[idx] = { ...list[idx], ...session };
+    } else {
+      list.unshift(session);
+    }
+    this.saveDutySessions(list);
+    return list;
+  }
+
+  // Smart Check-in: Audit / Change & Approval Logs
+  getDutyAuditLogs() {
+    const list = this.get(STORAGE_KEYS.DUTY_AUDIT_LOGS_CACHE, []);
+    return Array.isArray(list) ? list : [];
+  }
+
+  saveDutyAuditLogs(list) {
+    this.set(STORAGE_KEYS.DUTY_AUDIT_LOGS_CACHE, Array.isArray(list) ? list : []);
+  }
+
+  addDutyAuditLog(entry) {
+    const list = this.getDutyAuditLogs();
+    list.unshift(entry);
+    this.saveDutyAuditLogs(list);
     return list;
   }
 

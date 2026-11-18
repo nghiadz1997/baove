@@ -232,6 +232,7 @@ class PatrolModule {
 
     this.renderPatrolHistory(patrolLogs);
     this.updateOfflineBanner();
+    if (window.smartCheckInModule) window.smartCheckInModule.renderGuardCheckInUI();
   }
 
   renderPatrolHistory(logs) {

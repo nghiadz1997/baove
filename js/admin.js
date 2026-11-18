@@ -30,7 +30,14 @@ import {
   fetchPatrolLogsByDateRange,
   getCampusRequiredGuardsPerShift,
   getShiftBucketKey,
-  evaluateCampusShiftStaffing
+  evaluateCampusShiftStaffing,
+  CHECKIN_TYPES,
+  CHECKIN_STATUS_META,
+  buildSmartQrPayload,
+  approveOrRejectDutySession,
+  fetchDutySessionsByDateRange,
+  evaluateDailyDutyOverview,
+  saveSystemSettingsToFirestore
 } from "./firebase-config.js";
 
 class AdminDesktopModule {
@@ -56,6 +63,14 @@ class AdminDesktopModule {
     this.staffFilterStatus = 'on_duty'; // Default: only show on-duty staff (hide off_duty)
     this.rosterFilterCampus = 'all';
     this.rosterOnlyOnDuty = false;
+
+    // NSG SMART CHECK-IN Dashboard & Module filter state
+    this.checkInDate = getTodayDateKey();
+    this.checkInShift = 'all';
+    this.checkInPost = 'all';
+    this.checkInStatusFilter = 'all'; // 'all' | 'active' | 'not_checked_in' | 'substitution' | 'pending_approval' | 'checked_out'
+    this.checkInTab = 'overview'; // 'overview' | 'audit' | 'qr_cards'
+    this.checkInSessionsCache = null;
 
     // Patrol Logs filter state
     this.logFilterFrom = getTodayDateKey();
@@ -109,6 +124,7 @@ class AdminDesktopModule {
     const headerTitle = document.getElementById('admin-header-title');
     const titles = {
       dashboard: 'Tổng Quan & Giám Sát Google Maps',
+      smart_checkin: 'NSG SMART CHECK-IN — Nhận Ca QR, Trực Thay & Phê Duyệt',
       campuses: 'Quản Lý Cơ Sở Giáo Dục (Firestore)',
       zones: 'Khu Vực & Tòa Nhà',
       staff: 'Quản Lý Nhân Sự & Cấp Tài Khoản (Firestore)',
@@ -132,6 +148,9 @@ class AdminDesktopModule {
     switch (moduleKey) {
       case 'dashboard':
         this.renderDashboard(container);
+        break;
+      case 'smart_checkin':
+        this.renderSmartCheckIn(container);
         break;
       case 'campuses':
         this.renderCampuses(container);
@@ -191,13 +210,82 @@ class AdminDesktopModule {
   async setDashboardDate(dateKey) {
     if (!dateKey) return;
     this.dashboardDate = dateKey;
+    this.checkInDate = dateKey;
     const todayKey = getTodayDateKey();
     if (dateKey !== todayKey) {
       this.dashboardLogsCache = await fetchPatrolLogsByDateRange(dateKey, dateKey);
+      this.checkInSessionsCache = await fetchDutySessionsByDateRange(dateKey, dateKey);
     } else {
       this.dashboardLogsCache = null;
+      this.checkInSessionsCache = null;
     }
     this.renderDashboard(document.getElementById('admin-content-pane'));
+  }
+
+  updateSidebarCheckInBadge() {
+    const badge = document.getElementById('sidebar-checkin-pending-badge');
+    if (!badge) return;
+    const pendingCount = storage.getDutySessions().filter(s => s.checkInStatus === 'pending_approval').length;
+    if (pendingCount > 0) {
+      badge.textContent = pendingCount;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  async setCheckInDate(dateKey) {
+    if (!dateKey) return;
+    this.checkInDate = dateKey;
+    const todayKey = getTodayDateKey();
+    if (dateKey !== todayKey) {
+      this.checkInSessionsCache = await fetchDutySessionsByDateRange(dateKey, dateKey);
+    } else {
+      this.checkInSessionsCache = null;
+    }
+    this.renderModule(this.currentModule);
+  }
+
+  setCheckInShift(val) {
+    this.checkInShift = val || 'all';
+    this.renderModule(this.currentModule);
+  }
+
+  setCheckInPost(val) {
+    this.checkInPost = val || 'all';
+    this.renderModule(this.currentModule);
+  }
+
+  setCheckInStatusFilter(val) {
+    this.checkInStatusFilter = val || 'all';
+    this.renderModule(this.currentModule);
+  }
+
+  setCheckInTab(tab) {
+    this.checkInTab = tab || 'overview';
+    if (this.currentModule === 'smart_checkin') {
+      this.renderSmartCheckIn(document.getElementById('admin-content-pane'));
+    }
+  }
+
+  async handleAdminApproval(sessionId, decision) {
+    const approver = storage.getCurrentUser();
+    const note = decision === 'reject'
+      ? (prompt('Nhập lý do từ chối yêu cầu trực thay / đổi ca:', '') ?? null)
+      : (prompt('Ghi chú phê duyệt (có thể để trống):', 'Đã xác nhận đồng ý trực thay') ?? null);
+    if (note === null) return;
+
+    try {
+      await approveOrRejectDutySession(sessionId, decision, approver, note);
+      alert(decision === 'approve'
+        ? '✅ ĐÃ PHÊ DUYỆT TRỰC THAY!\nPhiên trực của nhân viên đã chính thức được kích hoạt và lịch phân công gốc vẫn được bảo toàn nguyên vẹn.'
+        : '❌ Đã từ chối yêu cầu trực thay và lưu vào lịch sử phê duyệt.');
+      this.updateSidebarCheckInBadge();
+      this.renderModule(this.currentModule);
+      if (window.renderManagerMobileUI) window.renderManagerMobileUI();
+    } catch (err) {
+      alert('Lỗi khi xử lý phê duyệt: ' + err.message);
+    }
   }
 
   setDashboardShift(shiftVal) {
@@ -295,6 +383,7 @@ class AdminDesktopModule {
    */
   renderDashboard(container) {
     if (!container) return;
+    this.updateSidebarCheckInBadge();
     const allCheckpoints = storage.getCheckpoints();
     const rawLogs = this.dashboardLogsCache !== null ? this.dashboardLogsCache : storage.getPatrolLogs();
     const incidents = storage.getIncidents();
@@ -649,6 +738,9 @@ class AdminDesktopModule {
           </div>
         </div>
 
+        <!-- NSG SMART CHECK-IN: NHÂN SỰ ĐANG TRỰC HÔM NAY (Section 4) -->
+        ${this.buildTodayDutyCheckInPanelHtml(campusList, shiftList, true)}
+
         <!-- Recent Patrol Log Table for Selected Date -->
         <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm">
           <div class="flex items-center justify-between mb-4">
@@ -682,7 +774,10 @@ class AdminDesktopModule {
                       <td class="p-3 font-mono font-semibold">${ts.toLocaleTimeString('vi-VN')} <span class="text-slate-400 font-normal">(${ts.toLocaleDateString('vi-VN')})</span></td>
                       <td class="p-3 font-bold text-slate-800 dark:text-slate-100">${l.checkpointName} <span class="text-[10px] font-mono text-slate-400">${l.checkpointCode || ''}</span></td>
                       <td class="p-3 text-[11px]">${l.shiftName || 'Ca Trực 24H'}</td>
-                      <td class="p-3 font-semibold">${l.guardName}</td>
+                      <td class="p-3 font-semibold">
+                        <div>${l.actualGuardName || l.guardName}</div>
+                        ${l.isSubstitutionPatrol ? `<span class="inline-block mt-0.5 px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-purple-100 text-purple-700">Trực thay: ${l.assignedGuardName || '—'}</span>` : ''}
+                      </td>
                       <td class="p-3 font-semibold ${isValid ? 'text-emerald-600' : 'text-amber-600'}">
                         ${l.distanceMeters !== null && l.distanceMeters !== undefined ? l.distanceMeters + 'm' : '—'}
                       </td>
@@ -901,6 +996,735 @@ class AdminDesktopModule {
       },
       () => alert('Không thể lấy tọa độ GPS.')
     );
+  }
+
+  // ==========================================================================
+  // NSG SMART CHECK-IN: DASHBOARD PANEL, APPROVAL QUEUE, AUDIT & QR CARDS
+  // ==========================================================================
+
+  /**
+   * Reusable "NHÂN SỰ ĐANG TRỰC HÔM NAY (NSG SMART CHECK-IN)" panel
+   * Embedded directly on Dashboard (compact=true) AND full-featured in Smart Check-in module
+   */
+  buildTodayDutyCheckInPanelHtml(campusList, shiftList, compact = false) {
+    const workDate = this.checkInDate || getTodayDateKey();
+    const displayVN = workDate.split('-').reverse().join('/');
+    const sessionsSource = this.checkInSessionsCache !== null ? this.checkInSessionsCache : storage.getDutySessions();
+    const overview = evaluateDailyDutyOverview(workDate, sessionsSource);
+
+    // Build combined rows: all checked-in/pending/checked-out sessions + scheduled guards who haven't checked in yet
+    let rows = [];
+
+    overview.sessions.forEach(s => {
+      rows.push({
+        isSession: true,
+        session: s,
+        guardName: s.guardName,
+        guardCode: s.guardCode || '',
+        postName: s.postName || s.campusName || '—',
+        campusId: s.campusId || '',
+        campusName: s.campusName || '',
+        shiftName: s.shiftName || 'Ca Trực 24H',
+        checkInTime: s.checkInServerIso || s.checkInTime,
+        checkOutTime: s.checkOutTime || null,
+        status: s.checkInStatus || 'active',
+        checkInType: s.checkInType || 'scheduled',
+        isSubstitution: Boolean(s.isSubstitution),
+        assignedGuardName: s.assignedGuardName || s.guardName,
+        changeReason: s.changeReason || '',
+        approvedBy: s.approvedBy || '',
+        patrolCount: s.patrolCount || 0
+      });
+    });
+
+    overview.notCheckedInGuards.forEach(g => {
+      rows.push({
+        isSession: false,
+        guard: g,
+        guardName: `${g.name} (${g.code || ''})`,
+        guardCode: g.code || '',
+        postName: g.campusName || 'Trụ sở chính - Số 47 Cao Lỗ',
+        campusId: g.campusId || 'cs-chinh',
+        campusName: g.campusName || 'Trụ sở chính - Số 47 Cao Lỗ',
+        shiftName: g.fixedShiftName || g.currentShiftName || 'Ca Trực 24H (06:00 - 06:00 hôm sau)',
+        checkInTime: null,
+        checkOutTime: null,
+        status: 'not_checked_in',
+        checkInType: 'scheduled',
+        isSubstitution: false,
+        assignedGuardName: `${g.name} (${g.code || ''})`,
+        changeReason: '',
+        approvedBy: '',
+        patrolCount: 0
+      });
+    });
+
+    // Apply Shift & Post/Campus filters
+    const shiftAndPostFiltered = rows.filter(r => {
+      if (this.checkInShift !== 'all') {
+        const targetBucket = getShiftBucketKey(this.checkInShift);
+        if (getShiftBucketKey(r.shiftName) !== targetBucket) return false;
+      }
+      if (this.checkInPost !== 'all') {
+        const matchedCampus = campusList.find(c => c.id === this.checkInPost);
+        const cMatch = r.campusId === this.checkInPost || (matchedCampus && (r.campusName || '').includes((matchedCampus.name || '').split('-')[0].trim()));
+        if (!cMatch) return false;
+      }
+      return true;
+    });
+
+    // Counts for status filter pills
+    const countActive = shiftAndPostFiltered.filter(r => r.status === 'active').length;
+    const countNotChecked = shiftAndPostFiltered.filter(r => r.status === 'not_checked_in').length;
+    const countSub = shiftAndPostFiltered.filter(r => r.isSubstitution).length;
+    const countPending = shiftAndPostFiltered.filter(r => r.status === 'pending_approval').length;
+    const countEnded = shiftAndPostFiltered.filter(r => r.status === 'checked_out').length;
+
+    // Apply Status Filter
+    const visibleRows = shiftAndPostFiltered.filter(r => {
+      if (this.checkInStatusFilter === 'all') return true;
+      if (this.checkInStatusFilter === 'substitution') return r.isSubstitution;
+      return r.status === this.checkInStatusFilter;
+    });
+
+    const pendingQueue = overview.pendingSessions;
+
+    return `
+      <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+        <div class="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200 uppercase">
+                NSG SMART CHECK-IN
+              </span>
+              <h4 class="font-extrabold text-base text-slate-800 dark:text-slate-100">
+                NHÂN SỰ ĐANG TRỰC ${workDate === getTodayDateKey() ? 'HÔM NAY' : `NGÀY ${displayVN}`}
+              </h4>
+            </div>
+            <p class="text-xs text-slate-500 mt-0.5">
+              Xác định chính xác: Ai được phân công • Ai thực tế đang trực • Ai trực thay • Vị trí trực • Đã/Chưa nhận ca • Ai tuần tra trong ca
+            </p>
+          </div>
+          <div class="flex items-center flex-wrap gap-2">
+            <button onclick="window.adminModule.exportSmartCheckInExcel()" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition flex items-center gap-1.5">
+              <i class="fa-solid fa-file-excel"></i> Xuất Excel Check-in
+            </button>
+            ${compact ? `
+              <button onclick="window.adminModule.switchModule('smart_checkin')" class="px-3 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-xs transition">
+                Mở Quản Lý Check-in & In QR &rarr;
+              </button>
+            ` : ''}
+          </div>
+        </div>
+
+        <!-- Pending Substitution Approval Alert Strip -->
+        ${pendingQueue.length > 0 ? `
+          <div class="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-400/80 dark:border-amber-700 space-y-2.5">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <div class="font-extrabold text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
+                <i class="fa-solid fa-user-clock text-amber-600 text-base animate-pulse"></i>
+                CÓ ${pendingQueue.length} YÊU CẦU TRỰC THAY / ĐỔI VỊ TRÍ / ĐỔI CA ĐANG CHỜ PHÊ DUYỆT
+              </div>
+              <span class="text-[11px] text-amber-700 dark:text-amber-300">Chưa được tính nhận ca chính thức cho tới khi Quản trị viên phê duyệt</span>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+              ${pendingQueue.map(s => {
+                const tMeta = CHECKIN_TYPES[s.checkInType] || CHECKIN_TYPES.substitute;
+                const reqTime = s.checkInTime ? new Date(s.checkInTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '';
+                return `
+                  <div class="p-3 bg-white dark:bg-slate-800 rounded-xl border border-amber-200 dark:border-amber-800 flex items-center justify-between gap-3 text-xs">
+                    <div class="min-w-0 space-y-0.5">
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${tMeta.badgeClass}">${tMeta.label}</span>
+                        <span class="font-mono text-[10px] text-slate-400">${reqTime}</span>
+                      </div>
+                      <div class="font-extrabold text-slate-800 dark:text-slate-100 truncate">Thực tế: ${s.guardName}</div>
+                      <div class="text-[11px] text-purple-700 dark:text-purple-300 truncate">Phân công gốc: <strong>${s.assignedGuardName}</strong></div>
+                      <div class="text-[11px] text-blue-600 truncate">${s.postName} • ${s.shiftName}</div>
+                      <div class="text-[10px] text-slate-500 italic">Lý do: ${s.changeReason || '—'}</div>
+                    </div>
+                    <div class="flex flex-col gap-1.5 shrink-0">
+                      <button onclick="window.adminModule.handleAdminApproval('${s.id}', 'approve')" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] transition">
+                        <i class="fa-solid fa-check mr-1"></i> Phê duyệt
+                      </button>
+                      <button onclick="window.adminModule.handleAdminApproval('${s.id}', 'reject')" class="px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-[11px] border border-rose-200 transition">
+                        <i class="fa-solid fa-xmark mr-1"></i> Từ chối
+                      </button>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <!-- Filters: Date, Shift, Post/Campus -->
+        <div class="flex items-center flex-wrap gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 text-xs">
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] font-bold text-slate-500">Ngày:</span>
+            <input type="date" value="${workDate}" onchange="window.adminModule.setCheckInDate(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 font-bold">
+          </div>
+          <select onchange="window.adminModule.setCheckInShift(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 font-bold">
+            <option value="all" ${this.checkInShift === 'all' ? 'selected' : ''}>Tất cả ca trực</option>
+            ${shiftList.map(s => `<option value="${s.name}" ${this.checkInShift === s.name ? 'selected' : ''}>${s.name}</option>`).join('')}
+          </select>
+          <select onchange="window.adminModule.setCheckInPost(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 font-bold">
+            <option value="all" ${this.checkInPost === 'all' ? 'selected' : ''}>Tất cả cơ sở / vị trí</option>
+            ${campusList.map(c => `<option value="${c.id}" ${this.checkInPost === c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
+          </select>
+
+          <!-- Classification Filter Pills (Section 4) -->
+          <div class="flex items-center flex-wrap gap-1.5 ml-auto">
+            ${[
+              { k: 'all', label: `Tất cả (${shiftAndPostFiltered.length})`, activeCls: 'bg-blue-600 text-white' },
+              { k: 'active', label: `🟢 Đã nhận ca (${countActive})`, activeCls: 'bg-emerald-600 text-white' },
+              { k: 'not_checked_in', label: `🔴 Chưa nhận ca (${countNotChecked})`, activeCls: 'bg-rose-600 text-white' },
+              { k: 'substitution', label: `🟣 Trực thay (${countSub})`, activeCls: 'bg-purple-600 text-white' },
+              { k: 'pending_approval', label: `🟡 Chờ duyệt (${countPending})`, activeCls: 'bg-amber-600 text-white' },
+              { k: 'checked_out', label: `⚪ Đã kết thúc (${countEnded})`, activeCls: 'bg-slate-700 text-white' }
+            ].map(p => `
+              <button onclick="window.adminModule.setCheckInStatusFilter('${p.k}')" class="px-2.5 py-1 rounded-lg font-bold text-[11px] transition ${this.checkInStatusFilter === p.k ? p.activeCls : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'}">
+                ${p.label}
+              </button>
+            `).join('')}
+          </div>
+        </div>
+
+        <!-- Duty Table -->
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs text-slate-600 dark:text-slate-300">
+            <thead class="bg-slate-50 dark:bg-slate-900 text-slate-500 uppercase text-[11px]">
+              <tr>
+                <th class="p-3">Nhân viên thực tế & Mã NV</th>
+                <th class="p-3">Vị trí trực</th>
+                <th class="p-3">Ca trực</th>
+                <th class="p-3">Giờ nhận / Kết thúc</th>
+                <th class="p-3">Trạng thái nhận ca</th>
+                <th class="p-3">Hình thức & Trực thay</th>
+                <th class="p-3 text-center">Tuần tra</th>
+                <th class="p-3 text-right">Thao tác / Phê duyệt</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
+              ${visibleRows.length === 0 ? `
+                <tr><td colspan="8" class="p-6 text-center text-slate-400">Không có nhân sự nào khớp bộ lọc trong ngày ${displayVN}.</td></tr>
+              ` : visibleRows.map(r => {
+                const stMeta = CHECKIN_STATUS_META[r.status] || CHECKIN_STATUS_META.not_checked_in;
+                const tMeta = CHECKIN_TYPES[r.checkInType] || CHECKIN_TYPES.scheduled;
+                const ciTimeStr = r.checkInTime ? new Date(r.checkInTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '—';
+                const coTimeStr = r.checkOutTime ? new Date(r.checkOutTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : null;
+                return `
+                  <tr class="hover:bg-slate-50/50">
+                    <td class="p-3">
+                      <div class="font-bold text-slate-800 dark:text-slate-100">${r.guardName}</div>
+                      ${r.isSession && r.session.latitude ? `
+                        <a href="https://www.google.com/maps?q=${r.session.latitude},${r.session.longitude}" target="_blank" class="text-[10px] text-blue-600 hover:underline font-mono">
+                          <i class="fa-solid fa-location-dot text-rose-500"></i> GPS ±${r.session.gpsAccuracy || '?'}m${r.session.distanceMeters !== null && r.session.distanceMeters !== undefined ? ` (${r.session.distanceMeters}m)` : ''}
+                        </a>
+                      ` : (r.guardCode ? `<span class="text-[10px] font-mono text-slate-400">${r.guardCode}</span>` : '')}
+                    </td>
+                    <td class="p-3">
+                      <div class="font-bold text-slate-800 dark:text-slate-100">${r.postName}</div>
+                      <div class="text-[10px] text-slate-400">${r.campusName}</div>
+                    </td>
+                    <td class="p-3 text-[11px] font-semibold">${r.shiftName}</td>
+                    <td class="p-3 font-mono font-bold whitespace-nowrap">
+                      <div class="${r.checkInTime ? 'text-emerald-600' : 'text-slate-400'}">Vào: ${ciTimeStr}</div>
+                      ${coTimeStr ? `<div class="text-[10px] text-slate-500">Ra: ${coTimeStr}</div>` : ''}
+                    </td>
+                    <td class="p-3 whitespace-nowrap">
+                      <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${stMeta.badgeClass} inline-flex items-center gap-1">
+                        <span class="w-1.5 h-1.5 rounded-full ${stMeta.dotClass}"></span>
+                        ${stMeta.label}
+                      </span>
+                    </td>
+                    <td class="p-3">
+                      ${r.isSession ? `
+                        <span class="px-2 py-0.5 rounded text-[10px] font-bold ${tMeta.badgeClass}">${tMeta.label}</span>
+                        ${r.isSubstitution ? `
+                          <div class="text-[10px] text-purple-700 dark:text-purple-300 mt-0.5">Phân công gốc: <strong>${r.assignedGuardName}</strong></div>
+                          <div class="text-[10px] text-slate-400 italic line-clamp-1" title="${r.changeReason}">Lý do: ${r.changeReason || '—'}</div>
+                        ` : ''}
+                        ${r.session.handoverCompleted ? `
+                          <div class="text-[10px] text-slate-500 mt-0.5">Bàn giao &rarr; <strong>${r.session.handoverToGuardName}</strong></div>
+                        ` : ''}
+                      ` : '<span class="text-[11px] text-slate-400">Theo lịch cố định</span>'}
+                    </td>
+                    <td class="p-3 text-center font-mono font-extrabold ${r.patrolCount > 0 ? 'text-blue-600' : 'text-slate-400'}">
+                      ${r.patrolCount} lượt
+                    </td>
+                    <td class="p-3 text-right whitespace-nowrap">
+                      ${r.isSession && r.status === 'pending_approval' ? `
+                        <div class="flex items-center justify-end gap-1">
+                          <button onclick="window.adminModule.handleAdminApproval('${r.session.id}', 'approve')" class="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px]">Duyệt</button>
+                          <button onclick="window.adminModule.handleAdminApproval('${r.session.id}', 'reject')" class="px-2 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-[10px]">Từ chối</button>
+                        </div>
+                      ` : (r.isSession && r.session.handoverCompleted ? `
+                        <button onclick="window.adminModule.viewSessionDetailModal('${r.session.id}')" class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[10px]">
+                          Xem bàn giao
+                        </button>
+                      ` : (r.isSession ? `
+                        <button onclick="window.adminModule.viewSessionDetailModal('${r.session.id}')" class="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[10px]">
+                          Chi tiết
+                        </button>
+                      ` : '<span class="text-[10px] text-rose-500 font-bold">Chưa quét QR</span>'))}
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  viewSessionDetailModal(sessionId) {
+    const s = storage.getDutySessions().find(x => x.id === sessionId)
+      || (this.checkInSessionsCache || []).find(x => x.id === sessionId);
+    if (!s) return;
+    document.getElementById('modal-session-detail')?.remove();
+
+    const tMeta = CHECKIN_TYPES[s.checkInType] || CHECKIN_TYPES.scheduled;
+    const stMeta = CHECKIN_STATUS_META[s.checkInStatus] || CHECKIN_STATUS_META.active;
+
+    const modalHtml = `
+      <div id="modal-session-detail" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-lg w-full shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+          <div class="flex items-start justify-between">
+            <div>
+              <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${stMeta.badgeClass}">${stMeta.label}</span>
+              <h3 class="font-extrabold text-base text-slate-900 dark:text-white mt-1">Chi Tiết Phiên Trực (NSG SMART CHECK-IN)</h3>
+              <div class="text-[10px] font-mono text-slate-400">Session ID: ${s.id}</div>
+            </div>
+            <button onclick="document.getElementById('modal-session-detail').remove()" class="text-slate-400 hover:text-slate-600 text-lg"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+            <div><span class="text-slate-400 block text-[10px]">Nhân sự thực tế:</span><strong>${s.guardName}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Phân công ban đầu:</span><strong>${s.assignedGuardName || s.guardName}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Vị trí trực:</span><strong class="text-blue-600">${s.postName}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Cơ sở:</span><strong>${s.campusName}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Ca trực:</span><strong>${s.shiftName}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Hình thức:</span><strong class="text-purple-700">${tMeta.label}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Giờ nhận ca:</span><strong class="font-mono">${s.checkInTime ? new Date(s.checkInTime).toLocaleString('vi-VN') : '—'}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Giờ kết thúc:</span><strong class="font-mono">${s.checkOutTime ? new Date(s.checkOutTime).toLocaleString('vi-VN') : 'Đang trong ca'}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">Mã QR Check-in:</span><strong class="font-mono">${s.qrCodeScanned || '—'}</strong></div>
+            <div><span class="text-slate-400 block text-[10px]">GPS Check-in:</span><strong class="font-mono">${s.latitude ? `${Number(s.latitude).toFixed(5)}, ${Number(s.longitude).toFixed(5)} (±${s.gpsAccuracy || '?'}m)` : 'Không có GPS'}</strong></div>
+          </div>
+
+          ${s.isSubstitution ? `
+            <div class="p-3.5 rounded-2xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 space-y-1">
+              <div class="font-extrabold text-purple-800 dark:text-purple-200">Thông tin Trực Thay / Phê Duyệt</div>
+              <div><strong>Lý do thay đổi:</strong> ${s.changeReason || '—'}</div>
+              <div><strong>Người phê duyệt:</strong> ${s.approvedBy || 'Chưa phê duyệt'}</div>
+              ${s.approvedAt ? `<div><strong>Thời gian duyệt:</strong> ${new Date(s.approvedAt).toLocaleString('vi-VN')}</div>` : ''}
+              ${s.approvalNote ? `<div><strong>Ghi chú duyệt:</strong> ${s.approvalNote}</div>` : ''}
+            </div>
+          ` : ''}
+
+          ${s.handoverCompleted ? `
+            <div class="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 space-y-1">
+              <div class="font-extrabold text-emerald-800 dark:text-emerald-200">Biên Bản Kết Thúc Ca & Bàn Giao</div>
+              <div><strong>Người bàn giao:</strong> ${s.handoverFromGuardName || s.guardName}</div>
+              <div><strong>Người nhận bàn giao:</strong> ${s.handoverToGuardName || '—'}</div>
+              <div><strong>Tình hình trong ca:</strong> ${s.handoverNotes || 'Bình thường'}</div>
+              <div><strong>Sự cố phát sinh:</strong> ${s.incidentSummary || 'Không có sự cố'}</div>
+            </div>
+          ` : ''}
+
+          <div class="flex justify-end">
+            <button onclick="document.getElementById('modal-session-detail').remove()" class="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold">Đóng</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+  }
+
+  /**
+   * Dedicated Module: NSG SMART CHECK-IN (Overview & Approvals, Audit History, QR Cards)
+   */
+  renderSmartCheckIn(container) {
+    if (!container) return;
+    this.updateSidebarCheckInBadge();
+
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+    const shifts = storage.getShifts();
+    const shiftList = shifts.length > 0 ? shifts : DEFAULT_SHIFTS;
+    const checkpoints = storage.getCheckpoints();
+    const auditLogs = storage.getDutyAuditLogs();
+    const workDate = this.checkInDate || getTodayDateKey();
+    const sessionsSource = this.checkInSessionsCache !== null ? this.checkInSessionsCache : storage.getDutySessions();
+    const ov = evaluateDailyDutyOverview(workDate, sessionsSource);
+
+    container.innerHTML = `
+      <div class="space-y-5">
+        <!-- BGH 6-Question Live Summary Bar -->
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div class="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xs">
+            <div class="text-[10px] font-bold uppercase text-slate-400">1. Phân công trực</div>
+            <div class="text-2xl font-black text-blue-600 font-mono mt-1">${ov.scheduledGuards.length}</div>
+            <div class="text-[10px] text-slate-500">Tổng bảo vệ theo lịch</div>
+          </div>
+          <div class="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-emerald-200 dark:border-emerald-800 shadow-xs">
+            <div class="text-[10px] font-bold uppercase text-emerald-600">2. Thực tế đang trực</div>
+            <div class="text-2xl font-black text-emerald-600 font-mono mt-1">${ov.activeSessions.length}</div>
+            <div class="text-[10px] text-slate-500">Đã QR Check-in hợp lệ</div>
+          </div>
+          <div class="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-purple-200 dark:border-purple-800 shadow-xs">
+            <div class="text-[10px] font-bold uppercase text-purple-600">3. Trực thay / Đổi ca</div>
+            <div class="text-2xl font-black text-purple-600 font-mono mt-1">${ov.substitutionSessions.length}</div>
+            <div class="text-[10px] text-slate-500">Ghi nhận nguyên lịch gốc</div>
+          </div>
+          <div class="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-800 shadow-xs">
+            <div class="text-[10px] font-bold uppercase text-amber-600">4. Chờ phê duyệt</div>
+            <div class="text-2xl font-black text-amber-600 font-mono mt-1">${ov.pendingSessions.length}</div>
+            <div class="text-[10px] text-slate-500">Cần BGH / Admin duyệt</div>
+          </div>
+          <div class="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-rose-200 dark:border-rose-800 shadow-xs">
+            <div class="text-[10px] font-bold uppercase text-rose-600">5. Chưa nhận ca</div>
+            <div class="text-2xl font-black text-rose-600 font-mono mt-1">${ov.notCheckedInGuards.length}</div>
+            <div class="text-[10px] text-slate-500">Chưa quét QR Check-in</div>
+          </div>
+          <div class="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xs">
+            <div class="text-[10px] font-bold uppercase text-slate-500">6. Đã bàn giao ca</div>
+            <div class="text-2xl font-black text-slate-700 dark:text-slate-200 font-mono mt-1">${ov.checkedOutSessions.length}</div>
+            <div class="text-[10px] text-slate-500">Đã QR Check-out</div>
+          </div>
+        </div>
+
+        <!-- Module Sub-Tabs -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <button onclick="window.adminModule.setCheckInTab('overview')" class="px-4 py-2 rounded-xl font-bold text-xs transition ${this.checkInTab === 'overview' ? 'bg-blue-600 text-white shadow-sm' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}">
+            <i class="fa-solid fa-user-check mr-1.5"></i> Bảng Nhận Ca & Phê Duyệt Trực Thay
+          </button>
+          <button onclick="window.adminModule.setCheckInTab('audit')" class="px-4 py-2 rounded-xl font-bold text-xs transition ${this.checkInTab === 'audit' ? 'bg-blue-600 text-white shadow-sm' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}">
+            <i class="fa-solid fa-clock-rotate-left mr-1.5"></i> Lịch Sử Thay Đổi & Phê Duyệt (${auditLogs.length})
+          </button>
+          <button onclick="window.adminModule.setCheckInTab('qr_cards')" class="px-4 py-2 rounded-xl font-bold text-xs transition ${this.checkInTab === 'qr_cards' ? 'bg-blue-600 text-white shadow-sm' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}">
+            <i class="fa-solid fa-qrcode mr-1.5"></i> Quản Lý & In Thẻ QR CHECK-IN / CHECK-OUT
+          </button>
+        </div>
+
+        ${this.checkInTab === 'overview' ? this.buildTodayDutyCheckInPanelHtml(campusList, shiftList, false) : ''}
+
+        ${this.checkInTab === 'audit' ? `
+          <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Lịch Sử Thay Đổi Phân Công, Phê Duyệt & Bàn Giao Ca</h4>
+                <p class="text-xs text-slate-500">Bản ghi bất biến lưu theo thời gian máy chủ Firebase (Nhân viên không thể tự chỉnh sửa)</p>
+              </div>
+              <button onclick="window.adminModule.exportSmartCheckInExcel()" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl">
+                <i class="fa-solid fa-file-excel mr-1"></i> Xuất Excel Lịch Sử
+              </button>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-xs text-slate-600 dark:text-slate-300">
+                <thead class="bg-slate-50 dark:bg-slate-900 text-slate-500 uppercase text-[11px]">
+                  <tr>
+                    <th class="p-3">Thời gian</th>
+                    <th class="p-3">Sự kiện</th>
+                    <th class="p-3">Nhân sự thực tế</th>
+                    <th class="p-3">Phân công gốc</th>
+                    <th class="p-3">Vị trí / Ca</th>
+                    <th class="p-3">Người thực hiện / Duyệt</th>
+                    <th class="p-3">Lý do / Ghi chú</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
+                  ${auditLogs.length === 0 ? `
+                    <tr><td colspan="7" class="p-8 text-center text-slate-400">Chưa có lịch sử nhận ca / trực thay nào được ghi nhận.</td></tr>
+                  ` : auditLogs.map(a => {
+                    const ts = a.timestampIso ? new Date(a.timestampIso) : new Date(a.createdAtClient || 0);
+                    const actionMap = {
+                      CHECKIN_CONFIRMED: { label: 'Nhận ca đúng lịch', cls: 'bg-emerald-100 text-emerald-700' },
+                      SUBSTITUTION_REQUESTED: { label: 'Gửi YC trực thay', cls: 'bg-amber-100 text-amber-800' },
+                      SUBSTITUTION_APPROVED: { label: 'Đã duyệt trực thay', cls: 'bg-blue-100 text-blue-700' },
+                      SUBSTITUTION_REJECTED: { label: 'Từ chối trực thay', cls: 'bg-rose-100 text-rose-700' },
+                      SHIFT_CHECKOUT_HANDOVER: { label: 'Kết thúc & Bàn giao', cls: 'bg-slate-200 text-slate-700' }
+                    };
+                    const meta = actionMap[a.action] || { label: a.action, cls: 'bg-slate-100 text-slate-700' };
+                    return `
+                      <tr class="hover:bg-slate-50/50">
+                        <td class="p-3 font-mono whitespace-nowrap">${ts.toLocaleTimeString('vi-VN')}<div class="text-[10px] text-slate-400">${ts.toLocaleDateString('vi-VN')}</div></td>
+                        <td class="p-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${meta.cls}">${meta.label}</span></td>
+                        <td class="p-3 font-bold text-slate-800 dark:text-slate-100">${a.guardName || '—'}</td>
+                        <td class="p-3">${a.assignedGuardName || '—'}</td>
+                        <td class="p-3"><div class="font-semibold">${a.postName || '—'}</div><div class="text-[10px] text-slate-400">${a.shiftName || ''}</div></td>
+                        <td class="p-3 font-semibold text-blue-600">${a.actorName || '—'}</td>
+                        <td class="p-3 text-[11px] max-w-xs">${a.reason || '—'}</td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ` : ''}
+
+        ${this.checkInTab === 'qr_cards' ? `
+          <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-5">
+            <div class="flex items-center justify-between flex-wrap gap-3">
+              <div>
+                <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Hệ Thống 3 Loại Mã QR Định Danh Vị Trí (Không Chứa Dữ Liệu Cá Nhân)</h4>
+                <p class="text-xs text-slate-500">
+                  <strong class="text-emerald-600">QR CHECK-IN</strong> (<code>NSG-CI:...</code>): Nhận ca •
+                  <strong class="text-blue-600">QR CHECKPOINT</strong>: Tuần tra chốt •
+                  <strong class="text-amber-600">QR CHECK-OUT</strong> (<code>NSG-CO:...</code>): Kết thúc & Bàn giao ca
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <button onclick="window.adminModule.printSmartQrSheet('QR_CHECKIN')" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl">
+                  <i class="fa-solid fa-print mr-1"></i> In Bộ Thẻ QR CHECK-IN
+                </button>
+                <button onclick="window.adminModule.printSmartQrSheet('QR_CHECKOUT')" class="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl">
+                  <i class="fa-solid fa-print mr-1"></i> In Bộ Thẻ QR CHECK-OUT
+                </button>
+              </div>
+            </div>
+
+            <!-- Campus-level Check-in / Check-out QR Cards -->
+            <div class="space-y-2">
+              <div class="text-xs font-extrabold uppercase tracking-wider text-slate-500">Mã QR Nhận Ca & Kết Thúc Ca Theo Cơ Sở</div>
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                ${campusList.map(c => {
+                  const ciCode = buildSmartQrPayload('QR_CHECKIN', `CAMPUS-${c.id}`);
+                  const coCode = buildSmartQrPayload('QR_CHECKOUT', `CAMPUS-${c.id}`);
+                  const ciImg = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(ciCode)}`;
+                  return `
+                    <div class="p-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/40 text-center space-y-2">
+                      <div class="font-extrabold text-xs text-slate-800 dark:text-slate-100 line-clamp-1" title="${c.name}">${c.name}</div>
+                      <img src="${ciImg}" alt="${ciCode}" class="w-32 h-32 mx-auto rounded-xl border border-slate-200 bg-white p-1.5">
+                      <div class="font-mono text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded inline-block">${ciCode}</div>
+                      <div class="flex gap-1.5 pt-1">
+                        <button onclick="window.adminModule.previewSmartQrTrioModal('${c.name.replace(/'/g, '')}', '${c.address || ''}', '${ciCode}', null, '${coCode}')" class="flex-1 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px]">
+                          Xem Check-in & Check-out
+                        </button>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+
+            <!-- Checkpoint-level 3-in-1 QR Table -->
+            ${checkpoints.length > 0 ? `
+              <div class="space-y-2 pt-2">
+                <div class="text-xs font-extrabold uppercase tracking-wider text-slate-500">Mã QR Theo Từng Chốt Trực (${checkpoints.length} chốt)</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  ${checkpoints.map(cp => {
+                    const ciCode = buildSmartQrPayload('QR_CHECKIN', cp.code);
+                    const cpCode = buildSmartQrPayload('QR_CHECKPOINT', cp.code);
+                    const coCode = buildSmartQrPayload('QR_CHECKOUT', cp.code);
+                    return `
+                      <div class="p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2 text-xs">
+                        <div class="min-w-0">
+                          <div class="font-bold text-slate-800 dark:text-slate-100 truncate">${cp.name}</div>
+                          <div class="text-[10px] text-slate-400 truncate">${cp.campusName || ''} • ${cp.code}</div>
+                        </div>
+                        <button onclick="window.adminModule.previewSmartQrTrioModal('${cp.name.replace(/'/g, '')}', '${(cp.campusName || '').replace(/'/g, '')}', '${ciCode}', '${cpCode}', '${coCode}')" class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-black text-white font-bold text-[11px] shrink-0">
+                          <i class="fa-solid fa-qrcode mr-1"></i> Bộ 3 QR
+                        </button>
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  previewSmartQrTrioModal(title, subtitle, checkInCode, checkpointCode, checkOutCode) {
+    document.getElementById('modal-smart-qr-trio')?.remove();
+    const cards = [
+      { label: 'QR CHECK-IN (NHẬN CA)', code: checkInCode, color: 'text-emerald-700 bg-emerald-50 border-emerald-300' },
+      checkpointCode ? { label: 'QR CHECKPOINT (TUẦN TRA)', code: checkpointCode, color: 'text-blue-700 bg-blue-50 border-blue-300' } : null,
+      { label: 'QR CHECK-OUT (KẾT THÚC CA)', code: checkOutCode, color: 'text-amber-700 bg-amber-50 border-amber-300' }
+    ].filter(Boolean);
+
+    const modalHtml = `
+      <div id="modal-smart-qr-trio" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-3xl w-full shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[92vh] overflow-y-auto">
+          <div class="flex items-start justify-between">
+            <div>
+              <h3 class="font-extrabold text-base text-slate-900 dark:text-white">${title}</h3>
+              <p class="text-xs text-slate-500">${subtitle} • Mã định danh vị trí chuẩn (không chứa thông tin cá nhân)</p>
+            </div>
+            <button onclick="document.getElementById('modal-smart-qr-trio').remove()" class="text-slate-400 hover:text-slate-600 text-lg"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-${cards.length} gap-4">
+            ${cards.map(c => {
+              const url = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(c.code)}`;
+              return `
+                <div class="p-4 rounded-2xl border-2 ${c.color} text-center space-y-2">
+                  <div class="text-[11px] font-extrabold uppercase">${c.label}</div>
+                  <img src="${url}" class="w-44 h-44 mx-auto bg-white p-2 rounded-xl border border-slate-200">
+                  <div class="font-mono text-xs font-bold bg-white px-2.5 py-1 rounded-lg border border-slate-200 inline-block">${c.code}</div>
+                  <div>
+                    <a href="${url}" download="${c.code.replace(/:/g, '_')}.png" class="text-[11px] font-bold underline">Tải ảnh PNG</a>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+          <div class="flex justify-end gap-2">
+            <button onclick="window.print()" class="px-4 py-2 rounded-xl bg-blue-600 text-white font-bold text-xs"><i class="fa-solid fa-print mr-1"></i> In thẻ</button>
+            <button onclick="document.getElementById('modal-smart-qr-trio').remove()" class="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-bold text-xs">Đóng</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+  }
+
+  printSmartQrSheet(qrType = 'QR_CHECKIN') {
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+    const checkpoints = storage.getCheckpoints();
+    const isIn = qrType === 'QR_CHECKIN';
+    const titleLabel = isIn ? 'MÃ QR CHECK-IN (XÁC NHẬN NHẬN CA)' : 'MÃ QR CHECK-OUT (KẾT THÚC CA & BÀN GIAO)';
+    const accent = isIn ? '#059669' : '#d97706';
+
+    const items = [
+      ...campusList.map(c => ({ name: `CƠ SỞ: ${c.name}`, sub: c.address || '', code: buildSmartQrPayload(qrType, `CAMPUS-${c.id}`) })),
+      ...checkpoints.map(cp => ({ name: `CHỐT: ${cp.name}`, sub: `${cp.campusName || ''} (${cp.zoneName || ''})`, code: buildSmartQrPayload(qrType, cp.code) }))
+    ];
+
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>In ${titleLabel} - NSG SMART CHECK-IN</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 20px; color: #1e293b; }
+          .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+          .card { border: 2px dashed ${accent}; border-radius: 12px; padding: 16px; text-align: center; page-break-inside: avoid; }
+          .badge { display: inline-block; background: ${accent}; color: white; font-size: 11px; font-weight: bold; padding: 3px 10px; border-radius: 99px; margin-bottom: 6px; }
+          .title { font-size: 14px; font-weight: bold; margin-bottom: 4px; }
+          .sub { font-size: 11px; color: #64748b; margin-bottom: 10px; }
+          .qr { width: 180px; height: 180px; margin: 0 auto 8px; }
+          .code { font-family: monospace; font-size: 12px; font-weight: bold; background: #f1f5f9; padding: 4px 8px; border-radius: 4px; }
+        </style>
+      </head>
+      <body>
+        <h2 style="text-align:center;color:${accent};">NSG SMART CHECK-IN — ${titleLabel}</h2>
+        <div class="grid">
+          ${items.map(it => `
+            <div class="card">
+              <div class="badge">${isIn ? 'QR CHECK-IN NHẬN CA' : 'QR CHECK-OUT KẾT THÚC CA'}</div>
+              <div class="title">${it.name}</div>
+              <div class="sub">${it.sub}</div>
+              <img class="qr" src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(it.code)}">
+              <div class="code">${it.code}</div>
+            </div>
+          `).join('')}
+        </div>
+        <script>window.onload = function() { window.print(); }</script>
+      </body>
+      </html>
+    `);
+    printWindow.document.close();
+  }
+
+  /**
+   * Export Multi-Sheet Excel Report for NSG SMART CHECK-IN (Section 8)
+   */
+  exportSmartCheckInExcel() {
+    const workDate = this.checkInDate || getTodayDateKey();
+    const sessionsSource = this.checkInSessionsCache !== null ? this.checkInSessionsCache : storage.getDutySessions();
+    const ov = evaluateDailyDutyOverview(workDate, sessionsSource);
+    const auditLogs = storage.getDutyAuditLogs();
+
+    const sheet1AssignedVsActual = [
+      ...ov.sessions.map((s, idx) => ({
+        'STT': idx + 1,
+        'Ngày trực': s.workDate,
+        'Nhân sự thực tế': s.guardName,
+        'Phân công ban đầu': s.assignedGuardName || s.guardName,
+        'Vị trí trực': s.postName,
+        'Cơ sở': s.campusName,
+        'Ca trực': s.shiftName,
+        'Hình thức': CHECKIN_TYPES[s.checkInType]?.label || s.checkInType,
+        'Trạng thái': CHECKIN_STATUS_META[s.checkInStatus]?.label || s.checkInStatus,
+        'Giờ nhận ca': s.checkInTime ? new Date(s.checkInTime).toLocaleString('vi-VN') : '',
+        'Giờ kết thúc ca': s.checkOutTime ? new Date(s.checkOutTime).toLocaleString('vi-VN') : '',
+        'Số lượt tuần tra': s.patrolCount || 0,
+        'Người duyệt': s.approvedBy || '',
+        'Người nhận bàn giao': s.handoverToGuardName || '',
+        'Ghi chú bàn giao': s.handoverNotes || ''
+      })),
+      ...ov.notCheckedInGuards.map((g, idx) => ({
+        'STT': ov.sessions.length + idx + 1,
+        'Ngày trực': workDate,
+        'Nhân sự thực tế': '(Chưa nhận ca)',
+        'Phân công ban đầu': `${g.name} (${g.code || ''})`,
+        'Vị trí trực': g.campusName || '',
+        'Cơ sở': g.campusName || '',
+        'Ca trực': g.fixedShiftName || 'Ca Trực 24H',
+        'Hình thức': 'Theo lịch phân công',
+        'Trạng thái': 'Chưa nhận ca',
+        'Giờ nhận ca': '',
+        'Giờ kết thúc ca': '',
+        'Số lượt tuần tra': 0,
+        'Người duyệt': '',
+        'Người nhận bàn giao': '',
+        'Ghi chú bàn giao': ''
+      }))
+    ];
+
+    const sheet2Substitutions = ov.substitutionSessions.map((s, idx) => ({
+      'STT': idx + 1,
+      'Ngày': s.workDate,
+      'Loại thay đổi': CHECKIN_TYPES[s.checkInType]?.label || s.checkInType,
+      'Người phân công gốc': s.assignedGuardName,
+      'Người trực thực tế': s.guardName,
+      'Vị trí trực': s.postName,
+      'Ca trực': s.shiftName,
+      'Lý do thay đổi': s.changeReason || '',
+      'Trạng thái duyệt': CHECKIN_STATUS_META[s.checkInStatus]?.label || s.checkInStatus,
+      'Người phê duyệt': s.approvedBy || 'Chưa duyệt',
+      'Thời gian duyệt': s.approvedAt ? new Date(s.approvedAt).toLocaleString('vi-VN') : ''
+    }));
+
+    const sheet3NotCheckedIn = ov.notCheckedInGuards.map((g, idx) => ({
+      'STT': idx + 1,
+      'Ngày': workDate,
+      'Họ tên bảo vệ': g.name,
+      'Mã NV': g.code || '',
+      'Cơ sở phân công': g.campusName || '',
+      'Ca trực phân công': g.fixedShiftName || 'Ca Trực 24H',
+      'Trạng thái': 'Chưa quét QR nhận ca'
+    }));
+
+    const sheet4Audit = auditLogs.map((a, idx) => ({
+      'STT': idx + 1,
+      'Thời gian': a.timestampIso ? new Date(a.timestampIso).toLocaleString('vi-VN') : (a.createdAtClient || ''),
+      'Hành động': a.action,
+      'Nhân sự thực tế': a.guardName || '',
+      'Người phân công gốc': a.assignedGuardName || '',
+      'Vị trí': a.postName || '',
+      'Ca trực': a.shiftName || '',
+      'Người thực hiện / Duyệt': a.actorName || '',
+      'Lý do / Ghi chú': a.reason || ''
+    }));
+
+    if (window.XLSX) {
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(sheet1AssignedVsActual.length ? sheet1AssignedVsActual : [{ 'Thông báo': 'Chưa có dữ liệu' }]), 'PhanCong_vs_ThucTe');
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(sheet2Substitutions.length ? sheet2Substitutions : [{ 'Thông báo': 'Không có trực thay / đổi ca' }]), 'TrucThay_DoiViTri');
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(sheet3NotCheckedIn.length ? sheet3NotCheckedIn : [{ 'Thông báo': 'Tất cả nhân sự đã nhận ca' }]), 'ChuaNhanCa');
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(sheet4Audit.length ? sheet4Audit : [{ 'Thông báo': 'Chưa có lịch sử thay đổi' }]), 'LichSuThayDoi_PheDuyet');
+      window.XLSX.writeFile(wb, `NSG_SmartCheckIn_${workDate}.xlsx`);
+    } else {
+      alert('Không tải được thư viện xuất Excel (.xlsx). Vui lòng kiểm tra kết nối mạng.');
+    }
   }
 
   /**
@@ -1410,8 +2234,11 @@ class AdminDesktopModule {
                       <button onclick="window.adminModule.openEditCheckpointModal('${cp.id}')" class="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-lg text-xs font-bold transition" title="Thay đổi vị trí GPS & nội dung chốt">
                         <i class="fa-solid fa-location-pen mr-1"></i> Sửa vị trí
                       </button>
-                      <button onclick="window.adminModule.previewQrModal('${cp.id}')" class="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-bold">
+                      <button onclick="window.adminModule.previewQrModal('${cp.id}')" class="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-bold" title="QR Tuần tra chốt">
                         <i class="fa-solid fa-qrcode"></i> QR
+                      </button>
+                      <button onclick="window.adminModule.previewSmartQrTrioModal('${(cp.name || '').replace(/'/g, '')}', '${(cp.campusName || '').replace(/'/g, '')}', 'NSG-CI:${cp.code}', '${cp.code}', 'NSG-CO:${cp.code}')" class="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold" title="Xem & in bộ 3 QR: Check-in, Checkpoint, Check-out">
+                        3 QR
                       </button>
                       <button onclick="window.adminModule.deleteCheckpoint('${cp.id}')" class="px-2 py-1 text-rose-600 hover:bg-rose-50 rounded text-xs font-bold" title="Xóa chốt">
                         <i class="fa-solid fa-trash-can"></i>
@@ -3091,7 +3918,11 @@ class AdminDesktopModule {
                       <div>${ts.toLocaleTimeString('vi-VN')}</div>
                       <div class="text-[10px] text-slate-400 font-normal">${ts.toLocaleDateString('vi-VN')}</div>
                     </td>
-                    <td class="p-3 font-semibold text-slate-800 dark:text-slate-100">${l.guardName}</td>
+                    <td class="p-3 font-semibold text-slate-800 dark:text-slate-100">
+                      <div>${l.actualGuardName || l.guardName}</div>
+                      ${l.isSubstitutionPatrol ? `<span class="inline-block mt-0.5 px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-purple-100 text-purple-700">Trực thay: ${l.assignedGuardName || '—'}</span>` : ''}
+                      ${l.dutySessionId ? `<div class="text-[9px] font-mono text-slate-400">Phiên: ${l.dutySessionId}</div>` : (l.patrolException ? '<span class="text-[9px] text-amber-600 font-bold">Ngoại lệ chưa Check-in</span>' : '')}
+                    </td>
                     <td class="p-3 text-[11px]">${l.shiftName || 'Ca Trực 24H'}</td>
                     <td class="p-3">
                       <div class="font-bold text-blue-600">${l.checkpointName}</div>
@@ -3137,7 +3968,10 @@ class AdminDesktopModule {
         'STT': idx + 1,
         'Ngày quét': ts.toLocaleDateString('vi-VN'),
         'Giờ quét': ts.toLocaleTimeString('vi-VN'),
-        'Nhân viên bảo vệ': l.guardName || '',
+        'Nhân viên thực tế': l.actualGuardName || l.guardName || '',
+        'Phân công ban đầu': l.assignedGuardName || l.guardName || '',
+        'Hình thức trực': l.isSubstitutionPatrol ? (CHECKIN_TYPES[l.checkInType]?.label || 'Trực thay') : 'Đúng lịch',
+        'Mã phiên trực (DutySessionId)': l.dutySessionId || '',
         'Ca trực': l.shiftName || 'Ca Trực 24H',
         'Tên chốt QR': l.checkpointName || '',
         'Mã QR': l.checkpointCode || '',
@@ -3427,7 +4261,10 @@ class AdminDesktopModule {
                 ${campusList.map(c => `<option value="${c.id}" ${this.reportCampus === c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
               </select>
               <button onclick="window.adminModule.exportMonthlyReportExcel()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5">
-                <i class="fa-solid fa-file-excel"></i> Xuất Excel Tháng
+                <i class="fa-solid fa-file-excel"></i> Xuất Excel Tuần Tra
+              </button>
+              <button onclick="window.adminModule.exportSmartCheckInExcel()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5">
+                <i class="fa-solid fa-id-badge"></i> Xuất Excel Check-in & Trực Thay
               </button>
               <button onclick="window.print()" class="px-4 py-2 bg-slate-900 hover:bg-black text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5">
                 <i class="fa-solid fa-print"></i> In Báo Cáo
@@ -3649,25 +4486,36 @@ class AdminDesktopModule {
             <label class="block font-bold mb-1">Thời gian giãn cách quét tối thiểu (Giây)</label>
             <input type="number" id="setting-cooldown" value="${settings.scanCooldownSeconds || 5}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
           </div>
+          <div class="p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 space-y-1.5">
+            <label class="flex items-center gap-2.5 cursor-pointer font-bold text-slate-800 dark:text-slate-100">
+              <input type="checkbox" id="setting-allow-patrol-no-checkin" class="w-4 h-4 rounded text-blue-600" ${settings.allowPatrolWithoutCheckIn ? 'checked' : ''}>
+              <span>Cho phép ngoại lệ: Quét tuần tra QR ngay cả khi bảo vệ chưa QR Check-in nhận ca</span>
+            </label>
+            <p class="text-[11px] text-slate-500 pl-6">
+              Mặc định <strong>TẮT</strong> theo quy chuẩn NSG SMART CHECK-IN (bắt buộc bảo vệ phải nhận ca chính thức mới được ghi nhận hoàn thành tuần tra). Chỉ bật khi Quản trị viên cho phép ngoại lệ tạm thời.
+            </p>
+          </div>
           <div class="pt-2">
-            <button onclick="window.adminModule.saveSystemSettings()" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl">Lưu Cấu Hình</button>
+            <button onclick="window.adminModule.saveSystemSettings()" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl">Lưu Cấu Hình lên Firestore</button>
           </div>
         </div>
       </div>
     `;
   }
 
-  saveSystemSettings() {
+  async saveSystemSettings() {
     const radius = parseInt(document.getElementById('setting-gps-radius').value, 10) || 20;
     const interval = parseInt(document.getElementById('setting-patrol-interval')?.value, 10) || 180;
     const cooldown = parseInt(document.getElementById('setting-cooldown').value, 10) || 5;
-    storage.saveSettings({
+    const allowPatrolWithoutCheckIn = Boolean(document.getElementById('setting-allow-patrol-no-checkin')?.checked);
+    await saveSystemSettingsToFirestore({
       ...storage.getSettings(),
       maxGpsRadiusMeters: radius,
       patrolIntervalMinutes: interval,
-      scanCooldownSeconds: cooldown
+      scanCooldownSeconds: cooldown,
+      allowPatrolWithoutCheckIn
     });
-    alert('✅ Đã lưu cấu hình an ninh!');
+    alert('✅ Đã lưu cấu hình an ninh & đồng bộ lên Firestore!');
   }
 }
 
@@ -3706,4 +4554,12 @@ window.renderShiftsUI = () => {
 };
 window.renderRosterUI = () => {
   if (adminModule.currentModule === 'roster') adminModule.renderRoster(document.getElementById('admin-content-pane'));
+};
+window.renderSmartCheckInUI = () => {
+  adminModule.updateSidebarCheckInBadge();
+  if (adminModule.currentModule === 'smart_checkin') {
+    adminModule.renderSmartCheckIn(document.getElementById('admin-content-pane'));
+  } else if (adminModule.currentModule === 'dashboard') {
+    adminModule.renderDashboard(document.getElementById('admin-content-pane'));
+  }
 };

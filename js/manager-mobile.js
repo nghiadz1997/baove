@@ -15,7 +15,10 @@ import {
   evaluateCheckpointDailyStatus,
   fetchPatrolLogsByDateRange,
   getCampusRequiredGuardsPerShift,
-  getShiftBucketKey
+  getShiftBucketKey,
+  CHECKIN_TYPES,
+  getActiveDutySessionForGuard,
+  approveOrRejectDutySession
 } from "./firebase-config.js";
 
 class ManagerMobileModule {
@@ -92,6 +95,24 @@ class ManagerMobileModule {
       if (window.renderHomeUI) window.renderHomeUI();
     } catch (err) {
       alert('Lỗi khi cập nhật trạng thái trực: ' + err.message);
+    }
+  }
+
+  async handleMobileApproval(sessionId, decision) {
+    const approver = storage.getCurrentUser();
+    const note = decision === 'reject'
+      ? (prompt('Nhập lý do từ chối yêu cầu trực thay (không bắt buộc):', '') ?? null)
+      : 'Đã phê duyệt nhanh qua ứng dụng Quản Lý Mobile';
+    if (decision === 'reject' && note === null) return;
+
+    try {
+      await approveOrRejectDutySession(sessionId, decision, approver, note || '');
+      alert(decision === 'approve' ? '✅ Đã PHÊ DUYỆT trực thay! Phiên trực đã kích hoạt chính thức.' : '❌ Đã từ chối yêu cầu trực thay.');
+      this.render();
+      if (window.renderDashboardUI) window.renderDashboardUI();
+      if (window.renderSmartCheckInUI) window.renderSmartCheckInUI();
+    } catch (err) {
+      alert('Lỗi khi phê duyệt: ' + err.message);
     }
   }
 
@@ -321,6 +342,52 @@ class ManagerMobileModule {
 
     const patrolLogs = dayLogs;
 
+    // Pending Substitution Approvals (NSG SMART CHECK-IN)
+    const pendingBox = document.getElementById('manager-pending-approvals-box');
+    if (pendingBox) {
+      const pendingSessions = storage.getDutySessions().filter(s =>
+        s.checkInStatus === 'pending_approval' &&
+        (this.selectedCampus === 'all' || s.campusId === this.selectedCampus)
+      );
+      if (pendingSessions.length === 0) {
+        pendingBox.innerHTML = '';
+      } else {
+        pendingBox.innerHTML = `
+          <div class="bg-amber-50 dark:bg-amber-950/40 rounded-2xl p-3.5 border-2 border-amber-400/80 dark:border-amber-700 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <h3 class="font-extrabold text-xs uppercase text-amber-800 dark:text-amber-200 flex items-center gap-1.5">
+                <i class="fa-solid fa-user-clock animate-pulse"></i> Yêu cầu trực thay chờ duyệt (${pendingSessions.length})
+              </h3>
+            </div>
+            ${pendingSessions.map(s => {
+              const tMeta = CHECKIN_TYPES[s.checkInType] || CHECKIN_TYPES.substitute;
+              return `
+                <div class="p-3 bg-white dark:bg-slate-800 rounded-xl border border-amber-200 dark:border-amber-800 text-xs space-y-2">
+                  <div class="flex items-start justify-between gap-2">
+                    <div>
+                      <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${tMeta.badgeClass}">${tMeta.label}</span>
+                      <div class="font-extrabold text-slate-800 dark:text-slate-100 mt-1">${s.guardName}</div>
+                      <div class="text-[11px] text-slate-500">Thay cho: <strong class="text-purple-700 dark:text-purple-300">${s.assignedGuardName}</strong></div>
+                      <div class="text-[11px] text-blue-600">${s.postName} • ${s.campusName}</div>
+                      <div class="text-[10px] text-slate-500 italic mt-0.5">Lý do: ${s.changeReason || '—'}</div>
+                    </div>
+                  </div>
+                  <div class="flex gap-2">
+                    <button onclick="window.managerMobileModule.handleMobileApproval('${s.id}', 'approve')" class="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]">
+                      <i class="fa-solid fa-check mr-1"></i> Phê duyệt
+                    </button>
+                    <button onclick="window.managerMobileModule.handleMobileApproval('${s.id}', 'reject')" class="px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-[11px] border border-rose-200">
+                      Từ chối
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `;
+      }
+    }
+
     // On-Duty Guards List (Strictly hides anyone who is off_duty / Nghỉ ca)
     const guardListEl = document.getElementById('manager-guard-cards-list');
     if (guardListEl) {
@@ -351,8 +418,12 @@ class ManagerMobileModule {
           : '';
 
         guardListEl.innerHTML = hiddenNote + onDutyGuards.map(g => {
-          const lastScan = patrolLogs.find(l => l.guardId === g.id);
+          const lastScan = patrolLogs.find(l => (l.actualGuardId || l.guardId) === g.id);
           const lastScanTime = lastScan ? new Date(lastScan.scannedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'Chưa có lượt quét';
+          const activeSession = getActiveDutySessionForGuard(g.id);
+          const sessionBadge = activeSession
+            ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-extrabold ${activeSession.isSubstitution ? 'bg-purple-100 text-purple-700' : 'bg-emerald-100 text-emerald-700'}">${activeSession.isSubstitution ? '✓ Trực thay' : '✓ QR Check-in'}</span>`
+            : `<span class="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-700">Chưa QR Check-in</span>`;
 
           return `
             <div class="p-3.5 bg-white dark:bg-slate-800 rounded-2xl border border-emerald-200/80 dark:border-emerald-800/60 shadow-xs flex items-center justify-between gap-3">
@@ -362,12 +433,13 @@ class ManagerMobileModule {
                   <span class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white dark:border-slate-800 bg-emerald-500"></span>
                 </div>
                 <div class="min-w-0">
-                  <div class="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-1.5 truncate">
-                    ${g.name}
+                  <div class="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-1.5 flex-wrap">
+                    <span class="truncate">${g.name}</span>
                     <span class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${g.code}</span>
+                    ${sessionBadge}
                   </div>
                   <div class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
-                    ${g.campusName || 'Trụ sở chính - Số 47 Cao Lỗ'}
+                    ${activeSession ? activeSession.postName : (g.campusName || 'Trụ sở chính - Số 47 Cao Lỗ')}
                   </div>
                   <div class="text-[10px] text-blue-600 dark:text-blue-400 font-medium truncate">
                     Ca: <strong>${g.fixedShiftName || g.currentShiftName || 'Ca Trực 24H'}</strong> • Quét gần nhất: <strong>${lastScanTime}</strong>

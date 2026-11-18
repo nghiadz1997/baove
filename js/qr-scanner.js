@@ -19,6 +19,7 @@ class QRScannerManager {
     this.gpsError = null;
     this.audioCtx = null;
     this.targetCheckpoint = null; // if opened from a specific checkpoint click
+    this.scanMode = 'patrol'; // 'patrol' | 'checkin' | 'checkout'
     this.isProcessing = false; // anti-spam flag
     this.scanCooldownTimer = null;
   }
@@ -404,21 +405,25 @@ class QRScannerManager {
 
     document.getElementById('btn-retry-permission')?.addEventListener('click', () => {
       document.getElementById('modal-permission-required')?.remove();
-      this.openScanner(checkpointId);
+      this.openScanner(checkpointId, this.scanMode);
     });
   }
 
   /**
-   * Open QR Scanner Fullscreen Overlay (Mandatory GPS & Camera Permissions)
+   * Open QR Scanner Fullscreen Overlay
+   * mode = 'patrol' (strict GPS + Camera + ≤20m) | 'checkin' (Camera mandatory + GPS supporting) | 'checkout' (Camera mandatory + GPS supporting)
    */
-  async openScanner(checkpointId = null) {
+  async openScanner(checkpointId = null, mode = 'patrol') {
     const scannerOverlay = document.getElementById('qr-scanner-overlay');
     if (!scannerOverlay) return;
+
+    this.scanMode = mode || 'patrol';
+    const isPatrolMode = this.scanMode === 'patrol';
 
     // 1. Show permission verification indicator
     this.showCheckingPermissionsToast();
 
-    // 2. Step 1: Check & Require GPS Permission
+    // 2. Step 1: Collect GPS (Strictly required for Patrol; supporting evidence for Check-in / Check-out)
     let gpsPosition = null;
     try {
       gpsPosition = await this.requestGpsPermission();
@@ -430,12 +435,18 @@ class QRScannerManager {
       };
       this.gpsError = null;
     } catch (gpsErr) {
-      this.hideCheckingPermissionsToast();
-      this.showPermissionRequiredModal('gps', gpsErr.message, checkpointId);
-      return;
+      if (isPatrolMode) {
+        this.hideCheckingPermissionsToast();
+        this.showPermissionRequiredModal('gps', gpsErr.message, checkpointId);
+        return;
+      } else {
+        // For Smart Check-in / Check-out, GPS is supporting evidence (Section 2.6 & 9)
+        console.warn('Check-in/Check-out GPS notice (continuing with Camera):', gpsErr.message);
+        this.gpsError = gpsErr.message;
+      }
     }
 
-    // 3. Step 2: Check & Require Camera Permission
+    // 3. Step 2: Check & Require Camera Permission (Always strictly mandatory to prevent fake ID check-ins)
     try {
       await this.requestCameraPermission();
     } catch (camErr) {
@@ -446,19 +457,67 @@ class QRScannerManager {
 
     this.hideCheckingPermissionsToast();
 
-    // 4. BOTH PERMISSIONS GRANTED! Proceed to open scanner overlay
-    // Check target checkpoint
-    if (checkpointId) {
+    // 4. Update Scanner Mode Header & Guidance Banner
+    const modeTitleEl = document.getElementById('scanner-mode-title');
+    const modeHintEl = document.getElementById('scanner-mode-hint');
+    if (modeTitleEl) {
+      if (this.scanMode === 'checkin') {
+        modeTitleEl.textContent = 'NSG SMART CHECK-IN • NHẬN CA';
+        modeTitleEl.className = 'text-[10px] text-emerald-400 uppercase tracking-widest font-extrabold';
+      } else if (this.scanMode === 'checkout') {
+        modeTitleEl.textContent = 'QR CHECK-OUT • KẾT THÚC CA';
+        modeTitleEl.className = 'text-[10px] text-amber-400 uppercase tracking-widest font-extrabold';
+      } else {
+        modeTitleEl.textContent = 'Xác Thực Chốt Tuần Tra NSG';
+        modeTitleEl.className = 'text-[10px] text-slate-400 uppercase tracking-widest font-bold';
+      }
+    }
+    if (modeHintEl) {
+      if (this.scanMode === 'checkin') {
+        modeHintEl.innerHTML = '<i class="fa-solid fa-id-badge text-emerald-400 mr-1"></i> Quét mã <strong>QR CHECK-IN</strong> (hoặc QR chốt) tại vị trí trực để xác nhận nhận ca';
+      } else if (this.scanMode === 'checkout') {
+        modeHintEl.innerHTML = '<i class="fa-solid fa-flag-checkered text-amber-400 mr-1"></i> Quét mã <strong>QR CHECK-OUT</strong> tại vị trí trực để kết thúc & bàn giao ca';
+      } else {
+        modeHintEl.innerHTML = '<i class="fa-solid fa-expand text-blue-400 mr-1"></i> Hướng camera vào mã QR chốt tuần tra';
+      }
+    }
+
+    // 5. Check target checkpoint (Patrol mode only)
+    if (isPatrolMode && checkpointId) {
       const allCheckpoints = storage.getCheckpoints();
       this.targetCheckpoint = allCheckpoints.find(c => c.id === checkpointId || c.code === checkpointId) || null;
     } else {
       this.targetCheckpoint = null;
     }
 
-    // Set Target Point Banner in scanner UI
+    // Set Target Point / Mode Banner in scanner UI
     const targetInfoEl = document.getElementById('scanner-target-checkpoint-info');
     if (targetInfoEl) {
-      if (this.targetCheckpoint) {
+      if (this.scanMode === 'checkin') {
+        targetInfoEl.classList.remove('hidden');
+        targetInfoEl.innerHTML = `
+          <div class="bg-emerald-900/70 backdrop-blur-md border border-emerald-400/40 rounded-xl p-2.5 px-3 flex items-center justify-between text-white text-xs">
+            <div>
+              <div class="text-[10px] text-emerald-300 uppercase tracking-wider font-bold">Chế độ xác nhận nhận ca</div>
+              <div class="font-bold text-sm text-white">Quét mã QR tại chốt trực của bạn</div>
+              <div class="text-[11px] text-emerald-100">Hỗ trợ cả nhận ca đúng lịch và trực thay / đổi ca</div>
+            </div>
+            <i class="fa-solid fa-user-check text-2xl text-emerald-300"></i>
+          </div>
+        `;
+      } else if (this.scanMode === 'checkout') {
+        targetInfoEl.classList.remove('hidden');
+        targetInfoEl.innerHTML = `
+          <div class="bg-amber-900/70 backdrop-blur-md border border-amber-400/40 rounded-xl p-2.5 px-3 flex items-center justify-between text-white text-xs">
+            <div>
+              <div class="text-[10px] text-amber-300 uppercase tracking-wider font-bold">Chế độ kết thúc ca & bàn giao</div>
+              <div class="font-bold text-sm text-white">Quét mã QR CHECK-OUT tại chốt trực</div>
+              <div class="text-[11px] text-amber-100">Ghi nhận giờ kết thúc & bàn giao ca tiếp theo</div>
+            </div>
+            <i class="fa-solid fa-right-from-bracket text-2xl text-amber-300"></i>
+          </div>
+        `;
+      } else if (this.targetCheckpoint) {
         targetInfoEl.classList.remove('hidden');
         targetInfoEl.innerHTML = `
           <div class="bg-blue-900/60 backdrop-blur-md border border-blue-400/30 rounded-xl p-2.5 px-3 flex items-center justify-between text-white text-xs">
@@ -631,10 +690,31 @@ class QRScannerManager {
       }
     } catch (e) {}
 
+    // Route by active scanner mode ('checkin' | 'checkout' | 'patrol')
+    if (this.scanMode === 'checkin' && window.smartCheckInModule) {
+      const checkRes = window.smartCheckInModule.handleCheckInQrScanned(decodedText.trim(), this.currentLocation);
+      if (!checkRes.handled) {
+        this.playErrorSound();
+        this.showErrorModal({ code: checkRes.code || 'INVALID_QR', message: checkRes.message });
+      }
+      setTimeout(() => { this.isProcessing = false; }, 1200);
+      return;
+    }
+
+    if (this.scanMode === 'checkout' && window.smartCheckInModule) {
+      const outRes = window.smartCheckInModule.handleCheckOutQrScanned(decodedText.trim(), this.currentLocation);
+      if (!outRes.handled) {
+        this.playErrorSound();
+        this.showErrorModal({ code: outRes.code || 'INVALID_QR', message: outRes.message });
+      }
+      setTimeout(() => { this.isProcessing = false; }, 1200);
+      return;
+    }
+
     const guard = storage.getCurrentUser();
     const shift = storage.getActiveShift();
 
-    // Verify and record with Cloud functions logic
+    // Verify and record with Cloud functions logic (Patrol mode)
     const result = await verifyAndRecordPatrolCloud({
       qrPayload: decodedText.trim(),
       userLocation: this.currentLocation,
@@ -741,19 +821,22 @@ class QRScannerManager {
     if (existing) existing.remove();
 
     const isOutOfRange = result.code === 'OUT_OF_RANGE';
-    const title = isOutOfRange ? 'NGOÀI KHU VỰC CÓ MÃ QR' : 'TỪ CHỐI XÁC THỰC QUÉT';
+    const isCheckInRequired = result.code === 'CHECKIN_REQUIRED';
+    const title = isOutOfRange
+      ? 'NGOÀI KHU VỰC CÓ MÃ QR'
+      : (isCheckInRequired ? 'CHƯA XÁC NHẬN NHẬN CA' : 'TỪ CHỐI XÁC THỰC QUÉT');
     const distStr = result.distanceMeters !== undefined ? `${result.distanceMeters}m` : null;
     const allowed = result.allowedRadius || 20;
 
     const modalHtml = `
       <div id="modal-scan-rejected" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in zoom-in-95 duration-200">
-        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-sm w-full shadow-2xl border border-rose-500/40 space-y-4">
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-sm w-full shadow-2xl border ${isCheckInRequired ? 'border-amber-500/50' : 'border-rose-500/40'} space-y-4">
           <div class="text-center space-y-2">
-            <div class="w-16 h-16 mx-auto rounded-3xl bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400 flex items-center justify-center text-3xl shadow-inner">
-              <i class="fa-solid fa-ban"></i>
+            <div class="w-16 h-16 mx-auto rounded-3xl ${isCheckInRequired ? 'bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400' : 'bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400'} flex items-center justify-center text-3xl shadow-inner">
+              <i class="fa-solid ${isCheckInRequired ? 'fa-id-badge' : 'fa-ban'}"></i>
             </div>
-            <span class="px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-200">
-              KHÔNG ĐƯỢC PHÉP QUÉT
+            <span class="px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider ${isCheckInRequired ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200' : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-200'}">
+              ${isCheckInRequired ? 'YÊU CẦU NSG SMART CHECK-IN' : 'KHÔNG ĐƯỢC PHÉP QUÉT'}
             </span>
             <h3 class="font-extrabold text-base text-slate-900 dark:text-white">
               ${title}
@@ -777,9 +860,15 @@ class QRScannerManager {
           </div>
 
           <div class="pt-1 flex flex-col gap-2">
-            <button id="btn-retry-scan-after-error" class="w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs shadow-md shadow-blue-500/20 active:scale-95 transition flex items-center justify-center gap-1.5">
-              <i class="fa-solid fa-arrows-rotate"></i> Tôi đã đến gần chốt (≤ 20m) - Quét lại
-            </button>
+            ${isCheckInRequired && !result.pendingApproval ? `
+              <button onclick="document.getElementById('modal-scan-rejected').remove(); window.scannerManager.closeScanner(); window.smartCheckInModule.startCheckInFlow();" class="w-full py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs shadow-md transition flex items-center justify-center gap-1.5">
+                <i class="fa-solid fa-qrcode"></i> Quét QR Xác Nhận Nhận Ca Ngay
+              </button>
+            ` : `
+              <button id="btn-retry-scan-after-error" class="w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs shadow-md shadow-blue-500/20 active:scale-95 transition flex items-center justify-center gap-1.5">
+                <i class="fa-solid fa-arrows-rotate"></i> ${isOutOfRange ? 'Tôi đã đến gần chốt (≤ 20m) - Quét lại' : 'Thử quét lại'}
+              </button>
+            `}
             <button onclick="document.getElementById('modal-scan-rejected').remove(); window.scannerManager.closeScanner();" class="w-full py-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold text-xs transition">
               Đóng máy quét
             </button>

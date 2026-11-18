@@ -21,7 +21,8 @@ import {
   query, 
   orderBy, 
   limit,
-  where
+  where,
+  runTransaction
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 import { 
   getAuth, 
@@ -432,6 +433,8 @@ export const COLLECTIONS = {
   CHECKPOINTS: 'checkpoints',
   SHIFTS: 'shifts',
   PATROL_LOGS: 'patrol_logs',
+  DUTY_SESSIONS: 'duty_sessions',
+  DUTY_AUDIT_LOGS: 'duty_audit_logs',
   INCIDENTS: 'incidents',
   HANDOVERS: 'handovers',
   SETTINGS: 'settings'
@@ -615,6 +618,77 @@ export function initRealtimeFirestoreSync() {
     storage.saveHandovers(handovers);
     if (window.renderHandoverUI) window.renderHandoverUI();
   }, (err) => console.warn('Handovers sync notice:', err.message));
+
+  // 8. Sync DUTY_SESSIONS (NSG SMART CHECK-IN Realtime)
+  const qDutySessions = query(collection(db, COLLECTIONS.DUTY_SESSIONS), orderBy('checkInTime', 'desc'), limit(400));
+  onSnapshot(qDutySessions, (snapshot) => {
+    const sessions = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      const ciServer = data.checkInTimeServer;
+      let ciIso = data.checkInTime || '';
+      if (ciServer && typeof ciServer.toDate === 'function') {
+        ciIso = ciServer.toDate().toISOString();
+      } else if (ciServer && typeof ciServer.seconds === 'number') {
+        ciIso = new Date(ciServer.seconds * 1000).toISOString();
+      }
+      const coServer = data.checkOutTimeServer;
+      let coIso = data.checkOutTime || null;
+      if (coServer && typeof coServer.toDate === 'function') {
+        coIso = coServer.toDate().toISOString();
+      } else if (coServer && typeof coServer.seconds === 'number') {
+        coIso = new Date(coServer.seconds * 1000).toISOString();
+      }
+      sessions.push({
+        ...data,
+        id: docSnap.id,
+        checkInTime: data.checkInTime || ciIso,
+        checkInServerIso: ciIso,
+        checkOutTime: coIso
+      });
+    });
+    storage.saveDutySessions(sessions);
+    if (window.renderHomeUI) window.renderHomeUI();
+    if (window.renderPatrolUI) window.renderPatrolUI();
+    if (window.renderShiftsUI) window.renderShiftsUI();
+    if (window.renderManagerMobileUI) window.renderManagerMobileUI();
+    if (window.renderDashboardUI) window.renderDashboardUI();
+    if (window.renderSmartCheckInUI) window.renderSmartCheckInUI();
+    if (window.renderReportsUI) window.renderReportsUI();
+  }, (err) => console.warn('Duty sessions sync notice:', err.message));
+
+  // 9. Sync DUTY_AUDIT_LOGS (Change & Approval Audit Trail)
+  const qAuditLogs = query(collection(db, COLLECTIONS.DUTY_AUDIT_LOGS), orderBy('createdAtClient', 'desc'), limit(300));
+  onSnapshot(qAuditLogs, (snapshot) => {
+    const audits = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      const srv = data.createdAt;
+      let srvIso = data.createdAtClient || '';
+      if (srv && typeof srv.toDate === 'function') {
+        srvIso = srv.toDate().toISOString();
+      } else if (srv && typeof srv.seconds === 'number') {
+        srvIso = new Date(srv.seconds * 1000).toISOString();
+      }
+      audits.push({
+        ...data,
+        id: docSnap.id,
+        timestampIso: srvIso || data.createdAtClient
+      });
+    });
+    storage.saveDutyAuditLogs(audits);
+    if (window.renderSmartCheckInUI) window.renderSmartCheckInUI();
+  }, (err) => console.warn('Duty audit logs sync notice:', err.message));
+
+  // 10. Sync SETTINGS (Global security settings including check-in exception toggle)
+  onSnapshot(doc(db, COLLECTIONS.SETTINGS, 'global'), (docSnap) => {
+    if (docSnap.exists()) {
+      const merged = { ...storage.getSettings(), ...docSnap.data() };
+      storage.saveSettings(merged);
+      if (window.renderHomeUI) window.renderHomeUI();
+      if (window.renderPatrolUI) window.renderPatrolUI();
+    }
+  }, (err) => console.warn('Settings sync notice:', err.message));
 }
 
 /**
@@ -875,12 +949,32 @@ export async function verifyAndRecordPatrolCloud(scanData) {
     }
   }
 
-  const checkpoint = checkpoints.find(c => c.code === qrPayload || c.id === qrPayload);
+  // 0. Check NSG SMART CHECK-IN Active Duty Session (Section 5: Patrol-Session Integration)
+  const activeSession = getActiveDutySessionForGuard(guard?.id);
+  const allowWithoutCheckIn = Boolean(settings.allowPatrolWithoutCheckIn);
+
+  if (!activeSession && !allowWithoutCheckIn) {
+    const pendingSession = getGuardCurrentDutySession(guard?.id);
+    const isPendingApproval = pendingSession && pendingSession.checkInStatus === 'pending_approval';
+    return {
+      success: false,
+      code: 'CHECKIN_REQUIRED',
+      pendingApproval: isPendingApproval,
+      message: isPendingApproval
+        ? 'Yêu cầu trực thay / đổi ca của bạn ĐANG CHỜ QUẢN TRỊ VIÊN PHÊ DUYỆT. Chưa được ghi nhận hoàn thành tuần tra chính thức cho đến khi được duyệt!'
+        : 'Bạn CHƯA XÁC NHẬN NHẬN CA (QR Check-in) cho ca trực hiện tại! Vui lòng quét mã QR Nhận Ca trước khi thực hiện tuần tra chính thức.'
+    };
+  }
+
+  // Normalize QR payload (supports raw checkpoint code AND NSG-CP:<code>)
+  const cleanPayload = (qrPayload || '').trim();
+  const normalizedCpCode = cleanPayload.startsWith('NSG-CP:') ? cleanPayload.slice(7).trim() : cleanPayload;
+  const checkpoint = checkpoints.find(c => c.code === normalizedCpCode || c.id === normalizedCpCode || c.code === cleanPayload || c.id === cleanPayload);
   if (!checkpoint) {
     return {
       success: false,
       code: 'INVALID_QR',
-      message: 'Mã QR không khớp với bất kỳ điểm chốt nào đã khai báo trên hệ thống Firestore!'
+      message: 'Mã QR không khớp với bất kỳ điểm chốt tuần tra nào đã khai báo trên hệ thống Firestore!'
     };
   }
 
@@ -931,7 +1025,16 @@ export async function verifyAndRecordPatrolCloud(scanData) {
   const nowDate = new Date();
   const patrolDateKey = formatLocalDateKey(nowDate);
   const patrolMonthKey = patrolDateKey.slice(0, 7);
-  const resolvedShiftName = guard?.fixedShiftName || guard?.currentShiftName || shift?.name || 'Ca Trực 24H (06:00 - 06:00 hôm sau)';
+
+  // Always bind actual guard, assigned guard, shift, and dutySessionId from the confirmed Active Duty Session!
+  const actualGuardId = activeSession ? activeSession.guardId : guard.id;
+  const actualGuardName = activeSession ? activeSession.guardName : `${guard.name} (${guard.code})`;
+  const assignedGuardId = activeSession ? (activeSession.assignedGuardId || actualGuardId) : guard.id;
+  const assignedGuardName = activeSession ? (activeSession.assignedGuardName || actualGuardName) : actualGuardName;
+  const resolvedShiftId = activeSession?.shiftId || shift?.id || 'ca-24h';
+  const resolvedShiftName = activeSession?.shiftName || guard?.fixedShiftName || guard?.currentShiftName || shift?.name || 'Ca Trực 24H (06:00 - 06:00 hôm sau)';
+  const isSubPatrol = Boolean(activeSession && activeSession.isSubstitution);
+  const isExceptionPatrol = !activeSession && allowWithoutCheckIn;
 
   const logEntry = {
     checkpointId: checkpoint.id,
@@ -941,10 +1044,20 @@ export async function verifyAndRecordPatrolCloud(scanData) {
     campusName: checkpoint.campusName || campus?.name || 'Cao Đẳng Nam Sài Gòn',
     zoneName: checkpoint.zoneName || '',
     floor: checkpoint.floor || '',
-    guardId: guard.id,
-    guardName: `${guard.name} (${guard.code})`,
+    // Core backward-compatible fields ALWAYS store the ACTUAL guard performing duty (never blindly default to scheduled guard)
+    guardId: actualGuardId,
+    guardName: actualGuardName,
     guardEmail: guard.email || '',
-    shiftId: shift?.id || 'ca-24h',
+    // NSG SMART CHECK-IN required patrol attribution fields (Section 5)
+    actualGuardId,
+    actualGuardName,
+    assignedGuardId,
+    assignedGuardName,
+    dutySessionId: activeSession ? activeSession.id : null,
+    checkInType: activeSession ? (activeSession.checkInType || 'scheduled') : 'exception_no_checkin',
+    isSubstitutionPatrol: isSubPatrol,
+    patrolException: isExceptionPatrol,
+    shiftId: resolvedShiftId,
     shiftName: resolvedShiftName,
     patrolDate: patrolDateKey,
     patrolMonth: patrolMonthKey,
@@ -954,8 +1067,12 @@ export async function verifyAndRecordPatrolCloud(scanData) {
     accuracy: userLocation?.accuracy ? Math.round(userLocation.accuracy) : null,
     guardCoordinates: userLocation ? { lat: userLocation.lat, lng: userLocation.lng } : null,
     gpsStatus: 'valid',
-    verificationStatus: 'verified_cloud',
-    notes: `Đã kiểm tra an toàn tại vị trí chốt (Cách ${Math.round(distanceMeters || 0)}m ≤ ${maxAllowed}m)`
+    verificationStatus: isExceptionPatrol ? 'verified_exception' : 'verified_cloud',
+    notes: isSubPatrol
+      ? `Trực thay (${assignedGuardName}) • Đã kiểm tra chốt (Cách ${Math.round(distanceMeters || 0)}m ≤ ${maxAllowed}m)`
+      : (isExceptionPatrol
+          ? `Ngoại lệ (Chưa Check-in ca) • Đã kiểm tra chốt (Cách ${Math.round(distanceMeters || 0)}m ≤ ${maxAllowed}m)`
+          : `Đã kiểm tra an toàn tại vị trí chốt (Cách ${Math.round(distanceMeters || 0)}m ≤ ${maxAllowed}m)`)
   };
 
   // Every scan is always stored as a brand-new separate record (never overwrites previous logs)
@@ -1261,4 +1378,735 @@ export async function createFirestoreShift(shiftData) {
     createdAt: serverTimestamp()
   });
   return { id: docRef.id, ...shiftData };
+}
+
+export async function saveSystemSettingsToFirestore(settingsObj) {
+  const merged = { ...storage.getSettings(), ...settingsObj };
+  storage.saveSettings(merged);
+  if (isFirebaseOnline && db) {
+    try {
+      await setDoc(doc(db, COLLECTIONS.SETTINGS, 'global'), {
+        ...merged,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    } catch (err) {
+      console.warn('Firestore settings save notice:', err.message);
+    }
+  }
+  return merged;
+}
+
+// ============================================================================
+// NSG SMART CHECK-IN ENGINE (QR Check-in, Substitution Approval, Check-out)
+// ============================================================================
+
+export const CHECKIN_TYPES = {
+  scheduled: {
+    code: 'scheduled',
+    label: 'Trực đúng lịch',
+    shortLabel: 'Đúng lịch',
+    badgeClass: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300',
+    requiresApproval: false
+  },
+  substitute: {
+    code: 'substitute',
+    label: 'Trực thay đồng nghiệp',
+    shortLabel: 'Trực thay',
+    badgeClass: 'bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300',
+    requiresApproval: true
+  },
+  swap_post: {
+    code: 'swap_post',
+    label: 'Đổi vị trí trực',
+    shortLabel: 'Đổi vị trí',
+    badgeClass: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300',
+    requiresApproval: true
+  },
+  swap_shift: {
+    code: 'swap_shift',
+    label: 'Đổi ca trực',
+    shortLabel: 'Đổi ca',
+    badgeClass: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-950/60 dark:text-cyan-300',
+    requiresApproval: true
+  },
+  emergency_extra: {
+    code: 'emergency_extra',
+    label: 'Bổ sung nhân sự trực đột xuất',
+    shortLabel: 'Đột xuất',
+    badgeClass: 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300',
+    requiresApproval: true
+  }
+};
+
+export const CHECKIN_STATUS_META = {
+  active: {
+    label: 'Đã nhận ca',
+    badgeClass: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300',
+    dotClass: 'bg-emerald-500'
+  },
+  pending_approval: {
+    label: 'Chờ phê duyệt',
+    badgeClass: 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300',
+    dotClass: 'bg-amber-500'
+  },
+  checked_out: {
+    label: 'Đã kết thúc ca',
+    badgeClass: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300',
+    dotClass: 'bg-slate-400'
+  },
+  rejected: {
+    label: 'Bị từ chối',
+    badgeClass: 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300',
+    dotClass: 'bg-rose-500'
+  },
+  not_checked_in: {
+    label: 'Chưa nhận ca',
+    badgeClass: 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300',
+    dotClass: 'bg-rose-500'
+  }
+};
+
+/**
+ * Build standardized Smart QR payload (contains ONLY post/checkpoint ID, NEVER personal info)
+ * - QR_CHECKIN:   NSG-CI:<postCodeOrId>
+ * - QR_CHECKPOINT: <cp.code> (100% backward compatible)
+ * - QR_CHECKOUT:  NSG-CO:<postCodeOrId>
+ */
+export function buildSmartQrPayload(qrType, targetIdOrCode) {
+  const clean = String(targetIdOrCode || '').trim();
+  if (qrType === 'QR_CHECKIN') return `NSG-CI:${clean}`;
+  if (qrType === 'QR_CHECKOUT') return `NSG-CO:${clean}`;
+  return clean;
+}
+
+/**
+ * Parse scanned QR string and resolve target checkpoint / campus post.
+ * Compatible with new QR CHECK-IN / QR CHECK-OUT codes AND existing checkpoint QR codes.
+ */
+export function parseSmartQrPayload(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return { valid: false, reason: 'Mã QR trống.' };
+
+  let qrType = 'QR_CHECKPOINT';
+  let refId = text;
+
+  if (text.startsWith('NSG-CI:')) {
+    qrType = 'QR_CHECKIN';
+    refId = text.slice(7).trim();
+  } else if (text.startsWith('NSG-CO:')) {
+    qrType = 'QR_CHECKOUT';
+    refId = text.slice(7).trim();
+  } else if (text.startsWith('NSG-CP:')) {
+    qrType = 'QR_CHECKPOINT';
+    refId = text.slice(7).trim();
+  }
+
+  const checkpoints = storage.getCheckpoints();
+  const campuses = storage.getCampuses();
+  const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+
+  // 1. Match Campus-level Check-in/Check-out QR (e.g. NSG-CI:CAMPUS-cs-chinh or NSG-CI:cs-chinh)
+  const campusRef = refId.startsWith('CAMPUS-') ? refId.slice(7) : refId;
+  const matchedCampus = campusList.find(c =>
+    c.id === campusRef || (c.code && c.code.toUpperCase() === campusRef.toUpperCase())
+  );
+  if (matchedCampus) {
+    return {
+      valid: true,
+      qrType,
+      rawQr: text,
+      checkpointId: null,
+      postId: matchedCampus.id,
+      postCode: matchedCampus.code || matchedCampus.id,
+      postName: `Chốt Trực Chính - ${matchedCampus.name}`,
+      campusId: matchedCampus.id,
+      campusName: matchedCampus.name,
+      lat: parseFloat(matchedCampus.lat || 10.735768115549721),
+      lng: parseFloat(matchedCampus.lng || 106.68071864291426),
+      allowedRadius: parseInt(matchedCampus.radiusMeters || 150, 10)
+    };
+  }
+
+  // 2. Match Checkpoint QR (works for NSG-CI:<cp.code>, NSG-CO:<cp.code>, or existing <cp.code>)
+  const matchedCp = checkpoints.find(cp =>
+    cp.code === refId || cp.id === refId || (cp.code && cp.code.toUpperCase() === refId.toUpperCase())
+  );
+  if (matchedCp) {
+    const parentCampus = campusList.find(c => c.id === matchedCp.campusId || c.name === matchedCp.campusName) || campusList[0];
+    return {
+      valid: true,
+      qrType,
+      rawQr: text,
+      checkpoint: matchedCp,
+      checkpointId: matchedCp.id,
+      postId: matchedCp.code || matchedCp.id,
+      postCode: matchedCp.code || matchedCp.id,
+      postName: matchedCp.name,
+      campusId: matchedCp.campusId || parentCampus?.id || 'cs-chinh',
+      campusName: matchedCp.campusName || parentCampus?.name || 'Trụ sở chính - Số 47 Cao Lỗ',
+      lat: parseFloat(matchedCp.lat || parentCampus?.lat || 10.735768115549721),
+      lng: parseFloat(matchedCp.lng || parentCampus?.lng || 106.68071864291426),
+      allowedRadius: parseInt(matchedCp.allowedRadius || 20, 10)
+    };
+  }
+
+  return {
+    valid: false,
+    qrType,
+    rawQr: text,
+    reason: 'Mã QR không thuộc vị trí trực hoặc điểm chốt nào đã khai báo trong hệ thống NSG SMART GUARD!'
+  };
+}
+
+/**
+ * Find the currently ACTIVE official duty session for a guard
+ * Supports 24H shift window (06:00 today -> 06:00 tomorrow)
+ */
+export function getActiveDutySessionForGuard(guardId, referenceDateKey = null) {
+  if (!guardId) return null;
+  const sessions = storage.getDutySessions();
+  const todayKey = referenceDateKey || getTodayDateKey();
+  const yesterdayKey = getYesterdayDateKey();
+  const currentHour = new Date().getHours();
+
+  return sessions.find(s => {
+    if (s.guardId !== guardId) return false;
+    if (s.checkInStatus !== 'active') return false;
+    if (s.workDate === todayKey) return true;
+    // Still inside yesterday's 24H shift window (00:00 - 05:59 next morning)
+    if (!referenceDateKey && currentHour < 6 && s.workDate === yesterdayKey) return true;
+    return false;
+  }) || null;
+}
+
+/**
+ * Get the latest duty session of a guard for today (active, pending_approval, or checked_out)
+ */
+export function getGuardCurrentDutySession(guardId, workDate = null) {
+  if (!guardId) return null;
+  const active = getActiveDutySessionForGuard(guardId, workDate);
+  if (active) return active;
+
+  const targetDate = workDate || getTodayDateKey();
+  const sessions = storage.getDutySessions();
+  // Prefer pending_approval, then latest checked_out/rejected for targetDate
+  const todaySessions = sessions.filter(s => s.guardId === guardId && s.workDate === targetDate);
+  return todaySessions.find(s => s.checkInStatus === 'pending_approval')
+    || todaySessions[0]
+    || null;
+}
+
+/**
+ * Check if guard is officially scheduled for the scanned campus & shift
+ */
+export function isGuardScheduledForPostAndShift(guard, postCampusId, shiftIdOrName, campusList = []) {
+  if (!guard) return false;
+  const list = campusList.length > 0 ? campusList : OFFICIAL_CAMPUSES;
+  const targetCampus = list.find(c => c.id === postCampusId);
+  const isTargetMain = postCampusId === 'cs-chinh' || postCampusId === 'cs-caolo';
+
+  let campusMatches = false;
+  if (guard.campusId && guard.campusId === postCampusId) {
+    campusMatches = true;
+  } else if (targetCampus && guard.campusName) {
+    const gName = guard.campusName.trim().toLowerCase();
+    const cName = targetCampus.name.trim().toLowerCase();
+    const cPrefix = cName.split('-')[0].trim();
+    if (gName === cName || (cPrefix && gName.includes(cPrefix))) campusMatches = true;
+  } else if (isTargetMain && !guard.campusId && (!guard.campusName || guard.campusName.toLowerCase().includes('cao lỗ') || guard.campusName.toLowerCase().includes('trụ sở chính'))) {
+    campusMatches = true;
+  }
+
+  const guardBucket = getShiftBucketKey(guard.fixedShiftName || guard.currentShiftName || 'Ca Trực 24H');
+  const targetBucket = getShiftBucketKey(shiftIdOrName || 'Ca Trực 24H');
+  const shiftMatches = guardBucket === targetBucket;
+
+  return { campusMatches, shiftMatches, isExactScheduled: campusMatches && shiftMatches };
+}
+
+/**
+ * Create a new Duty Session using Firestore Transaction (atomically prevents duplicate active sessions)
+ */
+export async function createDutySessionWithTransaction(payload) {
+  const {
+    guard,
+    parsedQr,
+    shiftId,
+    shiftName,
+    workDate = getTodayDateKey(),
+    location = null,
+    checkInType = 'scheduled',
+    assignedGuardId = null,
+    assignedGuardName = null,
+    changeReason = ''
+  } = payload;
+
+  if (!guard || !guard.id) {
+    throw new Error('Bạn phải đăng nhập bằng tài khoản bảo vệ cá nhân để xác nhận nhận ca!');
+  }
+  if (!parsedQr || !parsedQr.valid) {
+    throw new Error('Mã QR vị trí trực không hợp lệ.');
+  }
+
+  const typeMeta = CHECKIN_TYPES[checkInType] || CHECKIN_TYPES.scheduled;
+  const isSubstitution = checkInType !== 'scheduled';
+  if (isSubstitution && (!changeReason || changeReason.trim().length < 3)) {
+    throw new Error('Vui lòng nhập rõ lý do trực thay / thay đổi vị trí / đổi ca!');
+  }
+
+  const resolvedShiftId = shiftId || 'ca-24h';
+  const resolvedShiftName = shiftName || guard.fixedShiftName || 'Ca Trực 24H (06:00 - 06:00 hôm sau)';
+  const shiftBucket = getShiftBucketKey(resolvedShiftName);
+  const baseSessionId = `ds_${workDate}_${shiftBucket}_${guard.id}`;
+
+  // Calculate GPS distance as supporting evidence (Section 9: supporting evidence only, never sole identity proof)
+  let distanceMeters = null;
+  if (location && location.lat && location.lng && parsedQr.lat && parsedQr.lng) {
+    distanceMeters = Math.round(
+      calculateHaversineDistance(location.lat, location.lng, parsedQr.lat, parsedQr.lng) * 10
+    ) / 10;
+  }
+
+  const nowIso = new Date().toISOString();
+  const initialStatus = typeMeta.requiresApproval ? 'pending_approval' : 'active';
+  const actualGuardDisplay = `${guard.name} (${guard.code || guard.email})`;
+
+  const sessionBody = {
+    guardId: guard.id,
+    guardName: actualGuardDisplay,
+    guardCode: guard.code || '',
+    guardEmail: guard.email || '',
+    assignedGuardId: isSubstitution ? (assignedGuardId || '') : guard.id,
+    assignedGuardName: isSubstitution ? (assignedGuardName || 'Chưa chỉ định') : actualGuardDisplay,
+    checkpointId: parsedQr.checkpointId || null,
+    postId: parsedQr.postId,
+    postCode: parsedQr.postCode || parsedQr.postId,
+    postName: parsedQr.postName,
+    campusId: parsedQr.campusId || 'cs-chinh',
+    campusName: parsedQr.campusName || 'Trụ sở chính - Số 47 Cao Lỗ',
+    shiftId: resolvedShiftId,
+    shiftName: resolvedShiftName,
+    shiftBucket,
+    workDate,
+    checkInTime: nowIso,
+    latitude: location?.lat ?? null,
+    longitude: location?.lng ?? null,
+    gpsAccuracy: location?.accuracy ? Math.round(location.accuracy) : null,
+    distanceMeters,
+    qrCodeScanned: parsedQr.rawQr,
+    qrType: parsedQr.qrType || 'QR_CHECKIN',
+    checkInType,
+    checkInStatus: initialStatus,
+    isSubstitution,
+    changeReason: changeReason.trim(),
+    approvedBy: initialStatus === 'active' ? 'Tự động (Đúng lịch phân công)' : null,
+    approvedById: initialStatus === 'active' ? 'system_schedule' : null,
+    approvedAt: initialStatus === 'active' ? nowIso : null,
+    approvalNote: '',
+    checkOutTime: null,
+    checkOutQrCode: null,
+    handoverFromGuardId: null,
+    handoverFromGuardName: null,
+    handoverToGuardId: null,
+    handoverToGuardName: null,
+    handoverNotes: '',
+    incidentSummary: '',
+    handoverCompleted: false
+  };
+
+  // Prevent duplicate active session locally first
+  const localActive = getActiveDutySessionForGuard(guard.id, workDate);
+  if (localActive && localActive.shiftBucket === shiftBucket) {
+    throw new Error(`Bạn đã có phiên trực đang hoạt động (${localActive.postName}) cho ca này! Không thể tạo 2 phiên trực song song khi chưa kết thúc và bàn giao ca.`);
+  }
+  const localPending = storage.getDutySessions().find(s =>
+    s.guardId === guard.id && s.workDate === workDate && s.shiftBucket === shiftBucket && s.checkInStatus === 'pending_approval'
+  );
+  if (localPending) {
+    throw new Error(`Bạn đã gửi yêu cầu trực thay tại ${localPending.postName} đang chờ phê duyệt. Vui lòng đợi Quản trị viên xác nhận.`);
+  }
+
+  let finalSessionId = baseSessionId;
+
+  if (isFirebaseOnline && db) {
+    finalSessionId = await runTransaction(db, async (transaction) => {
+      const baseRef = doc(db, COLLECTIONS.DUTY_SESSIONS, baseSessionId);
+      const baseSnap = await transaction.get(baseRef);
+
+      if (!baseSnap.exists()) {
+        transaction.set(baseRef, {
+          ...sessionBody,
+          checkInTimeServer: serverTimestamp(),
+          requestedAtServer: serverTimestamp(),
+          approvedAtServer: initialStatus === 'active' ? serverTimestamp() : null,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        });
+        return baseSessionId;
+      }
+
+      const existing = baseSnap.data();
+      if (existing.checkInStatus === 'active') {
+        throw new Error(`Phiên trực cho ca này đã đang hoạt động tại ${existing.postName}! Không được tạo trùng phiên trực.`);
+      }
+      if (existing.checkInStatus === 'pending_approval') {
+        throw new Error(`Yêu cầu nhận ca thay thế cho ca này đang chờ Quản trị viên phê duyệt.`);
+      }
+      if (existing.checkInStatus === 'checked_out' && !existing.handoverCompleted) {
+        throw new Error('Phiên trực trước đó chưa hoàn tất quy trình chuyển giao hợp lệ.');
+      }
+
+      // If previous session was validly handed over or rejected, create a chained transfer session ID
+      const transferId = `${baseSessionId}__t${Date.now()}`;
+      const transferRef = doc(db, COLLECTIONS.DUTY_SESSIONS, transferId);
+      transaction.set(transferRef, {
+        ...sessionBody,
+        previousSessionId: baseSessionId,
+        checkInTimeServer: serverTimestamp(),
+        requestedAtServer: serverTimestamp(),
+        approvedAtServer: initialStatus === 'active' ? serverTimestamp() : null,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      return transferId;
+    });
+
+    // Write immutable audit trail
+    const auditRecord = {
+      sessionId: finalSessionId,
+      action: isSubstitution ? 'SUBSTITUTION_REQUESTED' : 'CHECKIN_CONFIRMED',
+      workDate,
+      guardId: guard.id,
+      guardName: actualGuardDisplay,
+      assignedGuardId: sessionBody.assignedGuardId,
+      assignedGuardName: sessionBody.assignedGuardName,
+      postName: sessionBody.postName,
+      campusName: sessionBody.campusName,
+      shiftName: resolvedShiftName,
+      checkInType,
+      reason: sessionBody.changeReason || 'Nhận ca đúng lịch phân công',
+      actorId: guard.id,
+      actorName: actualGuardDisplay,
+      createdAtClient: nowIso
+    };
+    try {
+      await addDoc(collection(db, COLLECTIONS.DUTY_AUDIT_LOGS), {
+        ...auditRecord,
+        createdAt: serverTimestamp()
+      });
+    } catch (auditErr) {
+      console.warn('Audit log write notice:', auditErr.message);
+    }
+    storage.addDutyAuditLog({ id: 'aud-' + Date.now(), ...auditRecord, timestampIso: nowIso });
+
+    // If officially active (scheduled), update live status to on_duty WITHOUT modifying fixed schedule!
+    if (initialStatus === 'active') {
+      try {
+        await updateFirestoreUser(guard.id, { status: 'on_duty' });
+      } catch (e) {}
+    }
+  }
+
+  const savedSession = { id: finalSessionId, ...sessionBody, checkInServerIso: nowIso };
+  storage.upsertDutySession(savedSession);
+  return savedSession;
+}
+
+/**
+ * Approve or Reject a substitution / swap / extra check-in request (Admin / Manager only)
+ */
+export async function approveOrRejectDutySession(sessionId, decision, approver, approvalNote = '') {
+  if (!approver || !['admin', 'manager', 'phophong'].includes(approver.role) && approver.email !== SUPER_ADMIN_EMAIL && !approver.isSuperAdmin) {
+    throw new Error('Chỉ Quản trị viên / Quản lý có thẩm quyền mới được phê duyệt trực thay!');
+  }
+  if (!['approve', 'reject'].includes(decision)) {
+    throw new Error('Trạng thái phê duyệt không hợp lệ.');
+  }
+
+  const newStatus = decision === 'approve' ? 'active' : 'rejected';
+  const nowIso = new Date().toISOString();
+  const approverLabel = `${approver.name || 'Quản trị viên'} (${approver.email || approver.code || 'ADMIN'})`;
+
+  let updatedSessionData = null;
+
+  if (isFirebaseOnline && db) {
+    updatedSessionData = await runTransaction(db, async (transaction) => {
+      const ref = doc(db, COLLECTIONS.DUTY_SESSIONS, sessionId);
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) {
+        throw new Error('Không tìm thấy phiên nhận ca cần phê duyệt trên Firestore.');
+      }
+      const data = snap.data();
+      if (data.checkInStatus !== 'pending_approval') {
+        throw new Error(`Yêu cầu này đã được xử lý trước đó (Trạng thái hiện tại: ${data.checkInStatus}).`);
+      }
+
+      transaction.update(ref, {
+        checkInStatus: newStatus,
+        approvedBy: approverLabel,
+        approvedById: approver.id || approver.email,
+        approvedAt: nowIso,
+        approvedAtServer: serverTimestamp(),
+        approvalNote: approvalNote.trim(),
+        updatedAt: serverTimestamp()
+      });
+
+      return { ...data, id: sessionId, checkInStatus: newStatus, approvedBy: approverLabel, approvedAt: nowIso, approvalNote: approvalNote.trim() };
+    });
+
+    // Write immutable approval audit log
+    const auditRecord = {
+      sessionId,
+      action: decision === 'approve' ? 'SUBSTITUTION_APPROVED' : 'SUBSTITUTION_REJECTED',
+      workDate: updatedSessionData.workDate,
+      guardId: updatedSessionData.guardId,
+      guardName: updatedSessionData.guardName,
+      assignedGuardId: updatedSessionData.assignedGuardId,
+      assignedGuardName: updatedSessionData.assignedGuardName,
+      postName: updatedSessionData.postName,
+      campusName: updatedSessionData.campusName,
+      shiftName: updatedSessionData.shiftName,
+      checkInType: updatedSessionData.checkInType,
+      reason: approvalNote.trim() || (decision === 'approve' ? 'Đã phê duyệt trực thay' : 'Từ chối yêu cầu trực thay'),
+      actorId: approver.id || approver.email,
+      actorName: approverLabel,
+      createdAtClient: nowIso
+    };
+    try {
+      await addDoc(collection(db, COLLECTIONS.DUTY_AUDIT_LOGS), {
+        ...auditRecord,
+        createdAt: serverTimestamp()
+      });
+    } catch (e) {}
+    storage.addDutyAuditLog({ id: 'aud-' + Date.now(), ...auditRecord, timestampIso: nowIso });
+
+    // If approved, set actual guard's live status to on_duty (NEVER alter original fixed schedule!)
+    if (decision === 'approve' && updatedSessionData.guardId) {
+      try {
+        await updateFirestoreUser(updatedSessionData.guardId, { status: 'on_duty' });
+      } catch (e) {}
+    }
+  }
+
+  if (updatedSessionData) {
+    storage.upsertDutySession(updatedSessionData);
+  }
+  return updatedSessionData;
+}
+
+/**
+ * End Duty Session & Record Handover using Firestore Transaction (strictly prevents double check-out!)
+ */
+export async function checkoutDutySessionWithTransaction(sessionId, checkoutData) {
+  const {
+    guard,
+    checkOutQrCode = '',
+    handoverToGuardId = '',
+    handoverToGuardName = '',
+    handoverNotes = '',
+    incidentSummary = '',
+    location = null
+  } = checkoutData;
+
+  if (!sessionId) throw new Error('Không tìm thấy mã phiên trực cần kết thúc.');
+  const nowIso = new Date().toISOString();
+
+  let finishedSession = null;
+
+  if (isFirebaseOnline && db) {
+    finishedSession = await runTransaction(db, async (transaction) => {
+      const ref = doc(db, COLLECTIONS.DUTY_SESSIONS, sessionId);
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) {
+        throw new Error('Không tìm thấy phiên trực trong Firestore.');
+      }
+      const data = snap.data();
+      if (data.checkInStatus === 'checked_out' || data.checkOutTime) {
+        throw new Error('Phiên trực này ĐÃ ĐƯỢC KẾT THÚC trước đó! Hệ thống không cho phép kết thúc một phiên trực hai lần.');
+      }
+      if (data.checkInStatus !== 'active') {
+        throw new Error('Chỉ có thể kết thúc và bàn giao phiên trực đang ở trạng thái Đã nhận ca (Active).');
+      }
+
+      const updates = {
+        checkInStatus: 'checked_out',
+        checkOutTime: nowIso,
+        checkOutTimeServer: serverTimestamp(),
+        checkOutQrCode: checkOutQrCode || '',
+        checkOutLatitude: location?.lat ?? null,
+        checkOutLongitude: location?.lng ?? null,
+        checkOutGpsAccuracy: location?.accuracy ? Math.round(location.accuracy) : null,
+        handoverFromGuardId: data.guardId,
+        handoverFromGuardName: data.guardName,
+        handoverToGuardId: handoverToGuardId || '',
+        handoverToGuardName: handoverToGuardName || 'Ca kế tiếp',
+        handoverNotes: handoverNotes.trim(),
+        incidentSummary: incidentSummary.trim(),
+        handoverCompleted: true,
+        updatedAt: serverTimestamp()
+      };
+
+      transaction.update(ref, updates);
+      return { ...data, id: sessionId, ...updates };
+    });
+
+    // Record in handovers collection
+    const handoverRecord = {
+      dutySessionId: sessionId,
+      workDate: finishedSession.workDate,
+      shiftId: finishedSession.shiftId,
+      shiftName: finishedSession.shiftName,
+      postName: finishedSession.postName,
+      campusId: finishedSession.campusId,
+      campusName: finishedSession.campusName,
+      fromGuardId: finishedSession.handoverFromGuardId,
+      fromGuardName: finishedSession.handoverFromGuardName,
+      toGuardId: finishedSession.handoverToGuardId,
+      toGuardName: finishedSession.handoverToGuardName,
+      notes: finishedSession.handoverNotes,
+      incidentSummary: finishedSession.incidentSummary,
+      handedOverAt: nowIso
+    };
+    try {
+      await addDoc(collection(db, COLLECTIONS.HANDOVERS), {
+        ...handoverRecord,
+        createdAt: serverTimestamp()
+      });
+    } catch (e) {}
+    storage.addHandover({ id: 'ho-' + Date.now(), ...handoverRecord });
+
+    // Record immutable audit log
+    const auditRecord = {
+      sessionId,
+      action: 'SHIFT_CHECKOUT_HANDOVER',
+      workDate: finishedSession.workDate,
+      guardId: finishedSession.guardId,
+      guardName: finishedSession.guardName,
+      assignedGuardId: finishedSession.assignedGuardId,
+      assignedGuardName: finishedSession.assignedGuardName,
+      postName: finishedSession.postName,
+      campusName: finishedSession.campusName,
+      shiftName: finishedSession.shiftName,
+      checkInType: finishedSession.checkInType,
+      reason: `Bàn giao cho ${finishedSession.handoverToGuardName}. Ghi chú: ${finishedSession.handoverNotes || 'Bình thường'}${finishedSession.incidentSummary ? ` | Sự cố: ${finishedSession.incidentSummary}` : ''}`,
+      actorId: guard?.id || finishedSession.guardId,
+      actorName: finishedSession.guardName,
+      createdAtClient: nowIso
+    };
+    try {
+      await addDoc(collection(db, COLLECTIONS.DUTY_AUDIT_LOGS), {
+        ...auditRecord,
+        createdAt: serverTimestamp()
+      });
+    } catch (e) {}
+    storage.addDutyAuditLog({ id: 'aud-' + Date.now(), ...auditRecord, timestampIso: nowIso });
+
+    // Mark guard off_duty after checkout
+    try {
+      await updateFirestoreUser(finishedSession.guardId, { status: 'off_duty' });
+    } catch (e) {}
+  }
+
+  if (finishedSession) {
+    storage.upsertDutySession(finishedSession);
+  }
+  return finishedSession;
+}
+
+/**
+ * Fetch duty sessions for any date range (uses single-field workDate range, no custom composite index)
+ */
+export async function fetchDutySessionsByDateRange(startDateKey, endDateKey) {
+  const mergeLocal = (fetched) => {
+    const map = new Map();
+    fetched.forEach(s => map.set(s.id, s));
+    storage.getDutySessions().forEach(s => {
+      if (s.workDate >= startDateKey && s.workDate <= endDateKey) {
+        map.set(s.id, s);
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => new Date(b.checkInTime || 0) - new Date(a.checkInTime || 0));
+  };
+
+  if (!isFirebaseOnline || !db) return mergeLocal([]);
+  try {
+    const q = query(
+      collection(db, COLLECTIONS.DUTY_SESSIONS),
+      where('workDate', '>=', startDateKey),
+      where('workDate', '<=', endDateKey),
+      orderBy('workDate', 'desc'),
+      limit(600)
+    );
+    const snap = await getDocs(q);
+    const list = [];
+    snap.forEach(docSnap => {
+      const data = docSnap.data();
+      list.push({ ...data, id: docSnap.id });
+    });
+    return mergeLocal(list);
+  } catch (err) {
+    console.warn('Fetch duty sessions range notice:', err.message);
+    return mergeLocal([]);
+  }
+}
+
+/**
+ * Evaluate complete daily duty overview (answers all 6 BGH / Admin questions for any workDate)
+ */
+export function evaluateDailyDutyOverview(workDate, sessionsSource = null, patrolLogsSource = null) {
+  const targetDate = workDate || getTodayDateKey();
+  const users = storage.getUsers();
+  const guards = users.filter(u => u.role === 'guard');
+  const allSessions = (sessionsSource || storage.getDutySessions()).filter(s => s.workDate === targetDate);
+  const allLogs = (patrolLogsSource || storage.getPatrolLogs()).filter(l => getLogDateKey(l) === targetDate);
+
+  // Count patrol scans per session & per actual guard
+  const scansBySession = new Map();
+  const scansByGuard = new Map();
+  allLogs.forEach(l => {
+    if (!isPatrolLogValid(l)) return;
+    if (l.dutySessionId) {
+      scansBySession.set(l.dutySessionId, (scansBySession.get(l.dutySessionId) || 0) + 1);
+    }
+    const gid = l.actualGuardId || l.guardId;
+    if (gid) {
+      scansByGuard.set(gid, (scansByGuard.get(gid) || 0) + 1);
+    }
+  });
+
+  // Track which assigned guards have been covered (either by themselves or via approved/active substitution)
+  const coveredAssignedGuardIds = new Set();
+  const checkedInGuardIds = new Set();
+
+  const enrichedSessions = allSessions.map(s => {
+    if (s.checkInStatus === 'active' || s.checkInStatus === 'checked_out') {
+      checkedInGuardIds.add(s.guardId);
+      if (s.assignedGuardId) coveredAssignedGuardIds.add(s.assignedGuardId);
+    }
+    const sessionPatrolCount = scansBySession.get(s.id) || 0;
+    const guardPatrolCount = scansByGuard.get(s.guardId) || 0;
+    return {
+      ...s,
+      patrolCount: sessionPatrolCount > 0 ? sessionPatrolCount : guardPatrolCount
+    };
+  });
+
+  // Guards who are scheduled in the system but have NOT checked in (and not covered by substitution)
+  const notCheckedInGuards = guards.filter(g => !checkedInGuardIds.has(g.id) && !coveredAssignedGuardIds.has(g.id));
+
+  const activeSessions = enrichedSessions.filter(s => s.checkInStatus === 'active');
+  const pendingSessions = enrichedSessions.filter(s => s.checkInStatus === 'pending_approval');
+  const checkedOutSessions = enrichedSessions.filter(s => s.checkInStatus === 'checked_out');
+  const substitutionSessions = enrichedSessions.filter(s => s.isSubstitution);
+
+  return {
+    workDate: targetDate,
+    scheduledGuards: guards,
+    sessions: enrichedSessions,
+    activeSessions,
+    pendingSessions,
+    checkedOutSessions,
+    substitutionSessions,
+    notCheckedInGuards
+  };
 }

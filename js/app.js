@@ -4,6 +4,7 @@
 
 import { storage } from "./storage.js";
 import { scannerManager } from "./qr-scanner.js";
+import { smartCheckInModule } from "./checkin.js";
 import { patrolModule } from "./patrol.js";
 import { incidentModule } from "./incident.js";
 import { handoverModule } from "./handover.js";
@@ -28,6 +29,7 @@ class AppController {
 
     // Initialize submodules
     scannerManager.init();
+    smartCheckInModule.init();
     patrolModule.init();
     incidentModule.init();
     handoverModule.init();
@@ -305,6 +307,9 @@ class AppController {
       dutyStatusBadge.className = "px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5";
       dutyStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Đang trực ca 24/24H`;
     }
+
+    // Update NSG SMART CHECK-IN live session card & badge
+    smartCheckInModule.renderGuardCheckInUI();
 
     // Daily patrol progress strictly for TODAY (YYYY-MM-DD) — never carries over yesterday's scans
     const todayKey = getTodayDateKey();

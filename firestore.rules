@@ -78,5 +78,44 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isAuthenticated() && isAdmin();
     }
+
+    // 9. NSG SMART CHECK-IN: Phiên nhận ca / trực thay / kết thúc ca (duty_sessions)
+    match /duty_sessions/{sessionId} {
+      allow read: if true;
+
+      // Bảo vệ chỉ được tạo mới phiên nhận ca (không được tự tạo trực thay ở trạng thái đã duyệt sẵn)
+      allow create: if
+        request.resource.data.guardId is string &&
+        request.resource.data.workDate is string &&
+        (
+          request.resource.data.checkInType == 'scheduled' ||
+          request.resource.data.checkInStatus == 'pending_approval'
+        );
+
+      // Admin/Quản lý được quyền phê duyệt trực thay;
+      // Nhân viên CHỈ được kết thúc ca (active -> checked_out) cho chính phiên của mình
+      // và TUYỆT ĐỐI không được sửa lịch sử nhận ca (guardId, assignedGuardId, checkInTime, approvedBy, checkInType)
+      allow update: if
+        (isAuthenticated() && isManager()) ||
+        (
+          resource.data.checkInStatus == 'active' &&
+          request.resource.data.checkInStatus == 'checked_out' &&
+          resource.data.checkOutTime == null &&
+          request.resource.data.guardId == resource.data.guardId &&
+          request.resource.data.assignedGuardId == resource.data.assignedGuardId &&
+          request.resource.data.checkInTime == resource.data.checkInTime &&
+          request.resource.data.checkInType == resource.data.checkInType &&
+          request.resource.data.approvedBy == resource.data.approvedBy &&
+          request.resource.data.workDate == resource.data.workDate
+        );
+
+      allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    // 10. Lịch sử thay đổi phân công & phê duyệt bất biến (duty_audit_logs)
+    match /duty_audit_logs/{logId} {
+      allow read, create: if true;
+      allow update, delete: if isAuthenticated() && isAdmin();
+    }
   }
 }
