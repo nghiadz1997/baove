@@ -28,6 +28,7 @@ export const DEFAULT_OFFICIAL_CAMPUSES = [
     lat: 10.735768115549721,
     lng: 106.68071864291426,
     radiusMeters: 150,
+    guardsPerShift: 2,
     status: 'active'
   },
   {
@@ -38,6 +39,7 @@ export const DEFAULT_OFFICIAL_CAMPUSES = [
     lat: 10.68950,
     lng: 106.60230,
     radiusMeters: 250,
+    guardsPerShift: 1,
     status: 'active'
   },
   {
@@ -48,6 +50,7 @@ export const DEFAULT_OFFICIAL_CAMPUSES = [
     lat: 10.74080,
     lng: 106.66620,
     radiusMeters: 120,
+    guardsPerShift: 1,
     status: 'active'
   },
   {
@@ -58,6 +61,7 @@ export const DEFAULT_OFFICIAL_CAMPUSES = [
     lat: 10.73890,
     lng: 106.67050,
     radiusMeters: 100,
+    guardsPerShift: 1,
     status: 'active'
   }
 ];
@@ -216,11 +220,16 @@ class LocalStorageManager {
     if (!Array.isArray(list)) {
       return [];
     }
-    return list.map(c => ({
-      ...c,
-      lat: typeof c.lat === 'string' ? parseFloat(c.lat) : c.lat,
-      lng: typeof c.lng === 'string' ? parseFloat(c.lng) : c.lng
-    }));
+    return list.map(c => {
+      const isMain = c.id === 'cs-chinh' || c.id === 'cs-caolo' || (c.code || '').toUpperCase() === 'CS-CHINH';
+      const quota = parseInt(c.guardsPerShift, 10);
+      return {
+        ...c,
+        lat: typeof c.lat === 'string' ? parseFloat(c.lat) : c.lat,
+        lng: typeof c.lng === 'string' ? parseFloat(c.lng) : c.lng,
+        guardsPerShift: !isNaN(quota) && quota > 0 ? quota : (isMain ? 2 : 1)
+      };
+    });
   }
 
   saveCampuses(list) {

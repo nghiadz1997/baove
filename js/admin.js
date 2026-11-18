@@ -27,7 +27,10 @@ import {
   getLogDateKey,
   isPatrolLogValid,
   evaluateCheckpointDailyStatus,
-  fetchPatrolLogsByDateRange
+  fetchPatrolLogsByDateRange,
+  getCampusRequiredGuardsPerShift,
+  getShiftBucketKey,
+  evaluateCampusShiftStaffing
 } from "./firebase-config.js";
 
 class AdminDesktopModule {
@@ -337,7 +340,7 @@ class AdminDesktopModule {
             <div>
               <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Lực lượng bảo vệ</p>
               <h3 class="text-3xl font-extrabold text-blue-600 mt-1">${onDutyCount}<span class="text-base text-slate-400 font-normal">/${guards.length}</span></h3>
-              <p class="text-xs text-emerald-600 font-semibold mt-1">Đang trực: ${onDutyCount} nhân viên</p>
+              <p class="text-[11px] text-emerald-600 font-semibold mt-1">Định biên: Cơ sở chính 2 BV/ca • Cơ sở phụ 1 BV/ca</p>
             </div>
             <div class="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-xl">
               <i class="fa-solid fa-user-shield"></i>
@@ -1675,6 +1678,9 @@ class AdminDesktopModule {
   renderCampuses(container) {
     if (!container) return;
     const campuses = storage.getCampuses();
+    const guards = storage.getUsers().filter(u => u.role === 'guard');
+    const staffingList = evaluateCampusShiftStaffing(campuses, guards);
+    const staffingById = new Map(staffingList.map(s => [s.campus.id, s]));
 
     container.innerHTML = `
       <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
@@ -1683,7 +1689,7 @@ class AdminDesktopModule {
             <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100 flex items-center gap-2">
               <i class="fa-solid fa-school text-blue-600"></i> Quản Lý Cơ Sở & Tùy Chỉnh Tọa Độ GPS (Google Maps)
             </h4>
-            <p class="text-xs text-slate-500">Super Administrator có thể thêm, xóa, chỉnh sửa trực tiếp tọa độ GPS tâm và bán kính geofence — đồng bộ thời gian thực với Firebase Firestore</p>
+            <p class="text-xs text-slate-500">Định biên quy định: <strong>Trụ sở chính: 2 bảo vệ / 1 ca trực</strong> • <strong>Cơ sở phụ / phân hiệu: 1 bảo vệ / 1 ca trực</strong></p>
           </div>
           <button onclick="window.adminModule.openAddCampusModal()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm transition">
             <i class="fa-solid fa-plus mr-1.5"></i> + Thêm phân hiệu mới
@@ -1699,6 +1705,10 @@ class AdminDesktopModule {
           ${campuses.map(c => {
             const isMain = c.id === 'cs-chinh' || c.id === 'cs-caolo';
             const radius = c.radiusMeters || c.radius || 150;
+            const quota = getCampusRequiredGuardsPerShift(c);
+            const stf = staffingById.get(c.id);
+            const assignedCount = stf ? stf.totalAssigned : 0;
+            const isEnough = assignedCount >= quota;
             const latVal = parseFloat(c.lat);
             const lngVal = parseFloat(c.lng);
             const hasCoords = !isNaN(latVal) && !isNaN(lngVal);
@@ -1712,9 +1722,15 @@ class AdminDesktopModule {
                         <span class="px-2 py-0.5 rounded text-[10px] font-extrabold bg-amber-500 text-white flex items-center gap-1 shadow-xs">
                           <i class="fa-solid fa-star text-[9px]"></i> TRỤ SỞ CHÍNH
                         </span>
-                      ` : ''}
+                      ` : `
+                        <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                          CƠ SỞ PHỤ
+                        </span>
+                      `}
                     </div>
-                    <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-100 text-emerald-700">Đang hoạt động</span>
+                    <span class="px-2 py-0.5 rounded text-[11px] font-bold ${isEnough ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}">
+                      ${isEnough ? `✓ Đủ quân số (${assignedCount} BV)` : `⚠ Thiếu BV (${assignedCount}/${quota})`}
+                    </span>
                   </div>
 
                   <h5 class="font-bold text-base text-slate-800 dark:text-slate-100 mt-1">${c.name}</h5>
@@ -1723,6 +1739,12 @@ class AdminDesktopModule {
                   </p>
 
                   <div class="mt-3 p-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200/80 dark:border-slate-700 text-xs space-y-1.5">
+                    <div class="flex items-center justify-between">
+                      <span class="text-slate-400">Định biên trực / 1 ca:</span>
+                      <span class="px-2 py-0.5 rounded-md font-extrabold ${isMain ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'}">
+                        <i class="fa-solid fa-user-shield mr-1"></i> ${quota} bảo vệ / 1 ca
+                      </span>
+                    </div>
                     <div class="flex items-center justify-between">
                       <span class="text-slate-400">Tọa độ GPS tâm:</span>
                       <span class="font-mono font-bold text-blue-600 dark:text-blue-400">
@@ -1797,14 +1819,18 @@ class AdminDesktopModule {
               <input type="text" id="edit-campus-name" value="${campus.name || ''}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-bold" required>
             </div>
 
-            <div class="grid grid-cols-2 gap-2">
+            <div class="grid grid-cols-3 gap-2">
               <div>
                 <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Mã cơ sở *</label>
                 <input type="text" id="edit-campus-code" value="${campus.code || 'CS'}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono font-bold uppercase" required>
               </div>
               <div>
-                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Bán kính kiểm soát GPS (Mét) *</label>
+                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Bán kính GPS (m) *</label>
                 <input type="number" id="edit-campus-radius" value="${initRadius}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-bold" required>
+              </div>
+              <div>
+                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Số BV / 1 ca *</label>
+                <input type="number" id="edit-campus-guards-per-shift" min="1" max="10" value="${getCampusRequiredGuardsPerShift(campus)}" class="w-full px-3 py-2 rounded-xl border border-blue-300 dark:border-blue-700 bg-blue-50/40 dark:bg-blue-950/40 font-bold text-blue-700 dark:text-blue-300" required>
               </div>
             </div>
 
@@ -1923,6 +1949,7 @@ class AdminDesktopModule {
       const code = document.getElementById('edit-campus-code').value.trim().toUpperCase();
       const address = document.getElementById('edit-campus-address').value.trim();
       const radiusMeters = parseInt(document.getElementById('edit-campus-radius').value, 10) || 150;
+      const guardsPerShift = parseInt(document.getElementById('edit-campus-guards-per-shift')?.value, 10) || (isMain ? 2 : 1);
       const lat = parseFloat(document.getElementById('edit-campus-lat').value);
       const lng = parseFloat(document.getElementById('edit-campus-lng').value);
 
@@ -1936,6 +1963,7 @@ class AdminDesktopModule {
         address,
         radiusMeters,
         radius: radiusMeters,
+        guardsPerShift,
         lat,
         lng,
         status: 'active'
@@ -2008,14 +2036,18 @@ class AdminDesktopModule {
               <input type="text" id="campus-name" placeholder="VD: Phân hiệu Quận 7 hoặc Cơ sở Ký Túc Xá" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-bold" required>
             </div>
 
-            <div class="grid grid-cols-2 gap-2">
+            <div class="grid grid-cols-3 gap-2">
               <div>
                 <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Mã cơ sở *</label>
                 <input type="text" id="campus-code" placeholder="VD: CS-Q7" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono font-bold uppercase" required>
               </div>
               <div>
-                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Bán kính geofence (Mét) *</label>
+                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Bán kính GPS (m) *</label>
                 <input type="number" id="campus-radius" value="150" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-bold" required>
+              </div>
+              <div>
+                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Số BV / 1 ca *</label>
+                <input type="number" id="campus-guards-per-shift" value="1" min="1" max="10" class="w-full px-3 py-2.5 rounded-xl border border-blue-300 dark:border-blue-700 bg-blue-50/40 dark:bg-blue-950/40 font-bold text-blue-700 dark:text-blue-300" required>
               </div>
             </div>
 
@@ -2137,6 +2169,7 @@ class AdminDesktopModule {
         const code = document.getElementById('campus-code').value.trim().toUpperCase();
         const address = document.getElementById('campus-address').value.trim();
         const radiusMeters = parseInt(document.getElementById('campus-radius').value, 10) || 150;
+        const guardsPerShift = parseInt(document.getElementById('campus-guards-per-shift')?.value, 10) || 1;
         const lat = parseFloat(document.getElementById('campus-lat').value) || 10.735768115549721;
         const lng = parseFloat(document.getElementById('campus-lng').value) || 106.68071864291426;
 
@@ -2149,13 +2182,14 @@ class AdminDesktopModule {
           address, 
           radiusMeters, 
           radius: radiusMeters, 
+          guardsPerShift,
           lat, 
           lng, 
           status: 'active' 
         });
 
         document.getElementById('modal-add-campus')?.remove();
-        alert(`✅ ĐÃ THÊM CƠ SỞ THÀNH CÔNG!\n\n• Cơ sở: ${name} (${code})\n• Địa chỉ: ${address}\n• Tọa độ GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)}\n• Bán kính: ${radiusMeters}m\n\nCơ sở đã được lưu trực tiếp vào Firestore và có thể phân công bảo vệ ngay lập tức!`);
+        alert(`✅ ĐÃ THÊM CƠ SỞ THÀNH CÔNG!\n\n• Cơ sở: ${name} (${code})\n• Định biên trực: ${guardsPerShift} bảo vệ / 1 ca\n• Địa chỉ: ${address}\n• Tọa độ GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)}\n• Bán kính: ${radiusMeters}m\n\nCơ sở đã được lưu trực tiếp vào Firestore và có thể phân công bảo vệ ngay lập tức!`);
         this.renderCampuses(document.getElementById('admin-content-pane'));
         if (window.renderCampusesUI) window.renderCampusesUI();
         if (window.renderManagerMobileUI) window.renderManagerMobileUI();
@@ -2200,6 +2234,22 @@ class AdminDesktopModule {
           <button onclick="window.adminModule.openAddShiftModal()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl transition">
             <i class="fa-solid fa-plus mr-1.5"></i> + Thêm ca trực
           </button>
+        </div>
+
+        <div class="p-3.5 rounded-2xl bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 flex items-center justify-between flex-wrap gap-3 text-xs">
+          <div class="flex items-center gap-2.5">
+            <div class="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center text-sm shrink-0">
+              <i class="fa-solid fa-user-shield"></i>
+            </div>
+            <div>
+              <div class="font-extrabold text-blue-900 dark:text-blue-200">Quy Định Định Biên Nhân Sự Trực Ca</div>
+              <div class="text-slate-600 dark:text-slate-300 mt-0.5">
+                ⭐ <strong>Trụ sở chính (Số 47 Cao Lỗ):</strong> <span class="font-extrabold text-blue-700 dark:text-blue-300">2 bảo vệ / 1 ca trực</span>
+                &nbsp;•&nbsp;
+                🏢 <strong>Các cơ sở phụ / phân hiệu:</strong> <span class="font-extrabold text-emerald-700 dark:text-emerald-300">1 bảo vệ / 1 ca trực</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
@@ -2298,6 +2348,7 @@ class AdminDesktopModule {
     });
     const kip1Guards = guards.filter(g => (g.fixedShiftName || g.currentShiftName || '').includes('Kíp 1'));
     const kip2Guards = guards.filter(g => (g.fixedShiftName || g.currentShiftName || '').includes('Kíp 2'));
+    const staffingSummary = evaluateCampusShiftStaffing(campusList, guards);
 
     container.innerHTML = `
       <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-5">
@@ -2306,12 +2357,54 @@ class AdminDesktopModule {
             <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100 flex items-center gap-2">
               <i class="fa-solid fa-calendar-check text-blue-600"></i> Bảng Phân Công Ca Trực Cố Định
             </h4>
-            <p class="text-xs text-slate-500">Super Admin & Quản lý phân công ca trực 24/24H cho bảo vệ (từ 06:00 sáng hôm nay đến 06:00 sáng mai đổi ca)</p>
+            <p class="text-xs text-slate-500">Định biên chuẩn: <strong>Cơ sở chính 2 bảo vệ / 1 ca</strong> • <strong>Cơ sở phụ 1 bảo vệ / 1 ca</strong> (Ca 24H: 06:00 hôm nay - 06:00 sáng mai)</p>
           </div>
           <div class="flex items-center gap-2">
             <button onclick="window.adminModule.openQuickAssignShiftModal()" class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm transition flex items-center gap-1.5">
               <i class="fa-solid fa-user-plus"></i> + Phân công ca trực cho bảo vệ
             </button>
+          </div>
+        </div>
+
+        <!-- Per-Campus Staffing Quota Tracker (Main: 2 guards/shift, Branch: 1 guard/shift) -->
+        <div class="space-y-2">
+          <div class="text-xs font-extrabold text-slate-700 dark:text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+            <i class="fa-solid fa-building-shield text-blue-600"></i> Định Biên Quân Số Theo Cơ Sở (Cơ sở chính: 2 BV/ca • Cơ sở phụ: 1 BV/ca)
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            ${staffingSummary.map(s => {
+              const badgeCls = s.totalAssigned >= s.requiredPerShift
+                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300';
+              const statusTxt = s.totalAssigned >= s.requiredPerShift ? '✓ Đủ định biên' : `⚠ Thiếu ${s.requiredPerShift - s.totalAssigned} BV`;
+              return `
+                <div class="p-3.5 rounded-xl border ${s.isMain ? 'border-blue-300 dark:border-blue-700 bg-blue-50/40 dark:bg-blue-950/20' : 'border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40'} space-y-2 text-xs">
+                  <div class="flex items-center justify-between gap-1">
+                    <span class="font-extrabold text-slate-800 dark:text-slate-100 truncate" title="${s.campus.name}">
+                      ${s.isMain ? '⭐ ' : '🏢 '}${s.campus.name}
+                    </span>
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="text-[11px] font-bold text-blue-700 dark:text-blue-300">Định mức: <strong>${s.requiredPerShift} BV / 1 ca</strong></span>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeCls}">${statusTxt}</span>
+                  </div>
+                  <div class="grid grid-cols-3 gap-1 pt-1 border-t border-slate-200/70 dark:border-slate-700/70 text-[10px] text-center font-mono">
+                    <div class="p-1 rounded bg-white dark:bg-slate-800">
+                      <div class="text-slate-400">Ca 24H</div>
+                      <div class="font-extrabold ${s.byShift.ca24h.length === s.requiredPerShift ? 'text-emerald-600' : (s.byShift.ca24h.length > s.requiredPerShift ? 'text-blue-600' : 'text-slate-600 dark:text-slate-300')}">${s.byShift.ca24h.length}/${s.requiredPerShift}</div>
+                    </div>
+                    <div class="p-1 rounded bg-white dark:bg-slate-800">
+                      <div class="text-slate-400">Kíp 1</div>
+                      <div class="font-extrabold ${s.byShift.kip1.length === s.requiredPerShift ? 'text-emerald-600' : (s.byShift.kip1.length > s.requiredPerShift ? 'text-blue-600' : 'text-slate-600 dark:text-slate-300')}">${s.byShift.kip1.length}/${s.requiredPerShift}</div>
+                    </div>
+                    <div class="p-1 rounded bg-white dark:bg-slate-800">
+                      <div class="text-slate-400">Kíp 2</div>
+                      <div class="font-extrabold ${s.byShift.kip2.length === s.requiredPerShift ? 'text-emerald-600' : (s.byShift.kip2.length > s.requiredPerShift ? 'text-blue-600' : 'text-slate-600 dark:text-slate-300')}">${s.byShift.kip2.length}/${s.requiredPerShift}</div>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join('')}
           </div>
         </div>
 
@@ -2449,9 +2542,49 @@ class AdminDesktopModule {
     `;
   }
 
+  /**
+   * Check campus shift quota before assigning a guard:
+   * - Main Campus: max 2 guards / shift
+   * - Sub-campuses: max 1 guard / shift
+   */
+  confirmCampusShiftQuota(campus, shiftName, excludeGuardId = null) {
+    if (!campus) return true;
+    const quota = getCampusRequiredGuardsPerShift(campus);
+    const targetBucket = getShiftBucketKey(shiftName);
+    const allGuards = storage.getUsers().filter(u => u.role === 'guard' && u.id !== excludeGuardId);
+
+    const existingInSlot = allGuards.filter(g => {
+      const sameCampus = (g.campusId && g.campusId === campus.id) ||
+        (g.campusName && campus.name && g.campusName.trim().toLowerCase() === campus.name.trim().toLowerCase());
+      if (!sameCampus) return false;
+      return getShiftBucketKey(g.fixedShiftName || g.currentShiftName) === targetBucket;
+    });
+
+    if (existingInSlot.length >= quota) {
+      const names = existingInSlot.map(g => `${g.name} (${g.code})`).join(', ');
+      return confirm(
+        `⚠️ CẢNH BÁO ĐỊNH BIÊN CA TRỰC:\n\n` +
+        `• Cơ sở: ${campus.name}\n` +
+        `• Quy định định biên: ${quota} bảo vệ / 1 ca trực\n` +
+        `• Ca "${shiftName}" hiện đã có đủ ${existingInSlot.length}/${quota} người: ${names}.\n\n` +
+        `Bạn có chắc chắn muốn phân công vượt định biên không?`
+      );
+    }
+    return true;
+  }
+
   async quickChangeGuardShift(guardId, newShift) {
     const users = storage.getUsers();
     const guard = users.find(u => u.id === guardId);
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+    const guardCampus = campusList.find(c => c.id === guard?.campusId || c.name === guard?.campusName) || campusList[0];
+
+    if (!this.confirmCampusShiftQuota(guardCampus, newShift, guardId)) {
+      this.renderRoster(document.getElementById('admin-content-pane'));
+      return;
+    }
+
     try {
       await updateFirestoreUser(guardId, { fixedShiftName: newShift, currentShiftName: newShift });
       alert(`✅ Đã chuyển ${guard?.name || 'nhân viên'} sang ${newShift} thành công và lưu vào Firestore!`);
@@ -2471,6 +2604,12 @@ class AdminDesktopModule {
     const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
     const campus = campusList.find(c => c.id === campusId);
     if (!campus) return;
+
+    const currentShift = guard?.fixedShiftName || guard?.currentShiftName || 'Ca Trực 24H (06:00 - 06:00 hôm sau)';
+    if (!this.confirmCampusShiftQuota(campus, currentShift, guardId)) {
+      this.renderRoster(document.getElementById('admin-content-pane'));
+      return;
+    }
 
     try {
       await updateFirestoreUser(guardId, { campusId: campus.id, campusName: campus.name });
@@ -2531,14 +2670,15 @@ class AdminDesktopModule {
             <div>
               <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Cơ sở / Phân hiệu phụ trách *</label>
               <select id="assign-campus-id" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-medium text-slate-800 dark:text-slate-100" required>
-                ${campusList.map(c => `
-                  <option value="${c.id}" ${targetGuard && (targetGuard.campusId === c.id || targetGuard.campusName === c.name) ? 'selected' : ''}>${c.name}</option>
-                `).join('')}
+                ${campusList.map(c => {
+                  const q = getCampusRequiredGuardsPerShift(c);
+                  return `<option value="${c.id}" ${targetGuard && (targetGuard.campusId === c.id || targetGuard.campusName === c.name) ? 'selected' : ''}>${c.name} (${q} BV / 1 ca)</option>`;
+                }).join('')}
               </select>
             </div>
 
             <div class="p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl text-xs text-blue-700 dark:text-blue-300">
-              <i class="fa-solid fa-cloud-arrow-up mr-1.5"></i> Thiết lập này được lưu vĩnh viễn vào Firestore và tự động áp dụng khi bảo vệ đăng nhập và thực hiện nhiệm vụ tuần tra.
+              <i class="fa-solid fa-user-shield mr-1.5"></i> Định biên chuẩn: <strong>Cơ sở chính 2 bảo vệ / 1 ca</strong> • <strong>Cơ sở phụ 1 bảo vệ / 1 ca</strong>. Dữ liệu lưu trực tiếp vào Firestore.
             </div>
 
             <div class="pt-2 flex justify-end gap-2">
@@ -2555,15 +2695,19 @@ class AdminDesktopModule {
 
     document.getElementById('form-quick-assign-shift').onsubmit = async (e) => {
       e.preventDefault();
-      const saveBtn = document.getElementById('btn-submit-quick-assign');
-      saveBtn.disabled = true;
-      saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang lưu...';
-
       const selectedGuardId = guardId || document.getElementById('assign-guard-id').value;
       const selectedShift = document.getElementById('assign-shift-name').value;
       const selectedCampusId = document.getElementById('assign-campus-id').value;
       const selectedCampus = campusList.find(c => c.id === selectedCampusId);
       const guard = guards.find(g => g.id === selectedGuardId);
+
+      if (!this.confirmCampusShiftQuota(selectedCampus, selectedShift, selectedGuardId)) {
+        return;
+      }
+
+      const saveBtn = document.getElementById('btn-submit-quick-assign');
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang lưu...';
 
       try {
         await updateFirestoreUser(selectedGuardId, {

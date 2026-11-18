@@ -13,7 +13,9 @@ import {
   getLogDateKey,
   getLogTimestampDate,
   evaluateCheckpointDailyStatus,
-  fetchPatrolLogsByDateRange
+  fetchPatrolLogsByDateRange,
+  getCampusRequiredGuardsPerShift,
+  getShiftBucketKey
 } from "./firebase-config.js";
 
 class ManagerMobileModule {
@@ -368,6 +370,12 @@ class ManagerMobileModule {
         }
       ];
 
+      const activeCampuses = storage.getCampuses();
+      const targetCampusObj = this.selectedCampus !== 'all' ? activeCampuses.find(c => c.id === this.selectedCampus) : null;
+      const requiredQuota = targetCampusObj
+        ? getCampusRequiredGuardsPerShift(targetCampusObj)
+        : activeCampuses.reduce((sum, c) => sum + getCampusRequiredGuardsPerShift(c), 0);
+
       scheduleEl.innerHTML = shiftDefinitions.map(sDef => {
         let assigned = [];
         if (sDef.key === 'kip1') {
@@ -390,7 +398,7 @@ class ManagerMobileModule {
                 </span>
                 <span class="text-xs font-bold text-slate-700 dark:text-slate-200 font-mono">${sDef.time}</span>
               </div>
-              <span class="text-[11px] font-bold text-slate-500">${assigned.length} nhân viên</span>
+              <span class="text-[11px] font-bold ${assigned.length >= requiredQuota ? 'text-emerald-600' : 'text-amber-600'}">${assigned.length}/${requiredQuota} BV</span>
             </div>
 
             <div class="space-y-1.5">
@@ -626,14 +634,15 @@ class ManagerMobileModule {
             <div>
               <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Cơ sở / Phân hiệu phụ trách *</label>
               <select id="modal-campus-select" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-medium text-slate-800 dark:text-slate-100" required>
-                ${campusList.map(c => `
-                  <option value="${c.id}" ${guard.campusId === c.id || guard.campusName === c.name ? 'selected' : ''}>${c.name}</option>
-                `).join('')}
+                ${campusList.map(c => {
+                  const q = getCampusRequiredGuardsPerShift(c);
+                  return `<option value="${c.id}" ${guard.campusId === c.id || guard.campusName === c.name ? 'selected' : ''}>${c.name} (${q} BV/ca)</option>`;
+                }).join('')}
               </select>
             </div>
 
             <div class="p-2.5 bg-blue-50/60 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl text-[10px] text-blue-700 dark:text-blue-300">
-              <i class="fa-solid fa-cloud-arrow-up mr-1"></i> Dữ liệu phân công sẽ lưu cố định vào Cloud Firestore và tự động áp dụng khi bảo vệ nhận ca tuần tra.
+              <i class="fa-solid fa-user-shield mr-1"></i> Định biên chuẩn: <strong>Cơ sở chính 2 BV / 1 ca</strong> • <strong>Cơ sở phụ 1 BV / 1 ca</strong>.
             </div>
 
             <div class="pt-2 flex justify-end gap-2">
@@ -650,13 +659,15 @@ class ManagerMobileModule {
 
     document.getElementById('form-manager-change-shift').onsubmit = async (e) => {
       e.preventDefault();
-      const saveBtn = document.getElementById('btn-save-manager-shift');
-      saveBtn.disabled = true;
-      saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang lưu...';
-
       const selectedShift = document.getElementById('modal-shift-select').value;
       const selectedCampusId = document.getElementById('modal-campus-select').value;
       const selectedCampus = campusList.find(c => c.id === selectedCampusId);
+
+      if (!this.confirmMobileQuota(selectedCampus, selectedShift, guardId)) return;
+
+      const saveBtn = document.getElementById('btn-save-manager-shift');
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang lưu...';
 
       try {
         await updateFirestoreUser(guardId, {
@@ -728,14 +739,15 @@ class ManagerMobileModule {
             <div>
               <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Cơ sở phân công *</label>
               <select id="modal-assign-campus" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-medium text-slate-800 dark:text-slate-100" required>
-                ${campusList.map(c => `
-                  <option value="${c.id}">${c.name}</option>
-                `).join('')}
+                ${campusList.map(c => {
+                  const q = getCampusRequiredGuardsPerShift(c);
+                  return `<option value="${c.id}">${c.name} (${q} BV/ca)</option>`;
+                }).join('')}
               </select>
             </div>
 
             <div class="p-2.5 bg-blue-50/60 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl text-[10px] text-blue-700 dark:text-blue-300">
-              <i class="fa-solid fa-cloud-arrow-up mr-1"></i> Dữ liệu phân công sẽ lưu cố định vào Cloud Firestore và tự động áp dụng khi bảo vệ nhận ca tuần tra.
+              <i class="fa-solid fa-user-shield mr-1"></i> Định biên chuẩn: <strong>Cơ sở chính 2 BV / 1 ca</strong> • <strong>Cơ sở phụ 1 BV / 1 ca</strong>.
             </div>
 
             <div class="pt-2 flex justify-end gap-2">
@@ -752,15 +764,17 @@ class ManagerMobileModule {
 
     document.getElementById('form-manager-quick-assign').onsubmit = async (e) => {
       e.preventDefault();
-      const saveBtn = document.getElementById('btn-save-manager-assign');
-      saveBtn.disabled = true;
-      saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang lưu...';
-
       const guardId = document.getElementById('modal-assign-guard').value;
       const selectedShift = document.getElementById('modal-assign-shift').value;
       const selectedCampusId = document.getElementById('modal-assign-campus').value;
       const selectedCampus = campusList.find(c => c.id === selectedCampusId);
       const guard = guards.find(g => g.id === guardId);
+
+      if (!this.confirmMobileQuota(selectedCampus, selectedShift, guardId)) return;
+
+      const saveBtn = document.getElementById('btn-save-manager-assign');
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang lưu...';
 
       try {
         await updateFirestoreUser(guardId, {
@@ -782,6 +796,32 @@ class ManagerMobileModule {
         saveBtn.innerHTML = '<i class="fa-solid fa-floppy-disk mr-1"></i> Lưu Phân Công';
       }
     };
+  }
+
+  confirmMobileQuota(campus, shiftName, excludeGuardId = null) {
+    if (!campus) return true;
+    const quota = getCampusRequiredGuardsPerShift(campus);
+    const targetBucket = getShiftBucketKey(shiftName);
+    const allGuards = storage.getUsers().filter(u => u.role === 'guard' && u.id !== excludeGuardId);
+
+    const existingInSlot = allGuards.filter(g => {
+      const sameCampus = (g.campusId && g.campusId === campus.id) ||
+        (g.campusName && campus.name && g.campusName.trim().toLowerCase() === campus.name.trim().toLowerCase());
+      if (!sameCampus) return false;
+      return getShiftBucketKey(g.fixedShiftName || g.currentShiftName) === targetBucket;
+    });
+
+    if (existingInSlot.length >= quota) {
+      const names = existingInSlot.map(g => `${g.name} (${g.code})`).join(', ');
+      return confirm(
+        `⚠️ CẢNH BÁO ĐỊNH BIÊN CA TRỰC:\n\n` +
+        `• Cơ sở: ${campus.name}\n` +
+        `• Quy định: ${quota} bảo vệ / 1 ca trực\n` +
+        `• Ca "${shiftName}" hiện đã đủ ${existingInSlot.length}/${quota} người: ${names}.\n\n` +
+        `Bạn có chắc chắn muốn phân công thêm không?`
+      );
+    }
+    return true;
   }
 }
 

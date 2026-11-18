@@ -55,6 +55,7 @@ export const OFFICIAL_CAMPUSES = [
     lat: 10.735768115549721,
     lng: 106.68071864291426,
     radiusMeters: 150,
+    guardsPerShift: 2,
     status: 'active'
   },
   {
@@ -65,6 +66,7 @@ export const OFFICIAL_CAMPUSES = [
     lat: 10.68950,
     lng: 106.60230,
     radiusMeters: 250,
+    guardsPerShift: 1,
     status: 'active'
   },
   {
@@ -75,6 +77,7 @@ export const OFFICIAL_CAMPUSES = [
     lat: 10.74080,
     lng: 106.66620,
     radiusMeters: 120,
+    guardsPerShift: 1,
     status: 'active'
   },
   {
@@ -85,6 +88,7 @@ export const OFFICIAL_CAMPUSES = [
     lat: 10.73890,
     lng: 106.67050,
     radiusMeters: 100,
+    guardsPerShift: 1,
     status: 'active'
   }
 ];
@@ -336,6 +340,68 @@ export function evaluateCheckpointDailyStatus(checkpoint, dateKey, filteredDayLo
   };
 }
 
+/**
+ * Staffing Quota Rule:
+ * - Cơ sở chính (Trụ sở chính - 47 Cao Lỗ): 2 bảo vệ / 1 ca trực
+ * - Cơ sở phụ / phân hiệu khác: 1 bảo vệ / 1 ca trực
+ */
+export function getCampusRequiredGuardsPerShift(campus) {
+  if (!campus) return 1;
+  const customQuota = parseInt(campus.guardsPerShift, 10);
+  if (!isNaN(customQuota) && customQuota > 0) {
+    return customQuota;
+  }
+  const isMain = campus.id === 'cs-chinh' || campus.id === 'cs-caolo' || (campus.code || '').toUpperCase() === 'CS-CHINH';
+  return isMain ? 2 : 1;
+}
+
+export function getShiftBucketKey(shiftName = '') {
+  const s = String(shiftName || '');
+  if (s.includes('Kíp 1')) return 'kip1';
+  if (s.includes('Kíp 2')) return 'kip2';
+  return 'ca24h';
+}
+
+export function evaluateCampusShiftStaffing(campuses, guards) {
+  const campusList = Array.isArray(campuses) ? campuses : [];
+  const guardList = Array.isArray(guards) ? guards : [];
+
+  return campusList.map(c => {
+    const isMain = c.id === 'cs-chinh' || c.id === 'cs-caolo' || (c.code || '').toUpperCase() === 'CS-CHINH';
+    const requiredPerShift = getCampusRequiredGuardsPerShift(c);
+
+    const campusGuards = guardList.filter(g => {
+      if (g.campusId && g.campusId === c.id) return true;
+      if (g.campusName && c.name && g.campusName.trim().toLowerCase() === c.name.trim().toLowerCase()) return true;
+      if (isMain && !g.campusId && (!g.campusName || g.campusName.toLowerCase().includes('cao lỗ') || g.campusName.toLowerCase().includes('trụ sở chính'))) return true;
+      return false;
+    });
+
+    const byShift = {
+      ca24h: campusGuards.filter(g => getShiftBucketKey(g.fixedShiftName || g.currentShiftName) === 'ca24h'),
+      kip1: campusGuards.filter(g => getShiftBucketKey(g.fixedShiftName || g.currentShiftName) === 'kip1'),
+      kip2: campusGuards.filter(g => getShiftBucketKey(g.fixedShiftName || g.currentShiftName) === 'kip2')
+    };
+
+    // Active shift slots (any shift bucket that has at least 1 guard, or default ca24h if none)
+    const activeShiftKeys = Object.keys(byShift).filter(k => byShift[k].length > 0);
+    const totalAssigned = campusGuards.length;
+    const isSufficient = totalAssigned >= requiredPerShift;
+    const isExactOrFull = activeShiftKeys.length > 0 && activeShiftKeys.every(k => byShift[k].length >= requiredPerShift);
+
+    return {
+      campus: c,
+      isMain,
+      requiredPerShift,
+      campusGuards,
+      byShift,
+      totalAssigned,
+      isSufficient,
+      isExactOrFull
+    };
+  });
+}
+
 let app, db, auth;
 let secondaryApp, secondaryAuth;
 let isFirebaseOnline = false;
@@ -452,13 +518,16 @@ export function initRealtimeFirestoreSync() {
       const latNum = typeof data.lat === 'string' ? parseFloat(data.lat) : data.lat;
       const lngNum = typeof data.lng === 'string' ? parseFloat(data.lng) : data.lng;
       const radNum = parseInt(data.radiusMeters || data.radius || 150, 10);
+      const isMain = docSnap.id === 'cs-chinh' || docSnap.id === 'cs-caolo' || (data.code || '').toUpperCase() === 'CS-CHINH';
+      const quotaNum = parseInt(data.guardsPerShift, 10);
       firestoreCampuses.push({
         ...data,
         id: docSnap.id,
         lat: isNaN(latNum) ? 10.735768115549721 : latNum,
         lng: isNaN(lngNum) ? 106.68071864291426 : lngNum,
         radiusMeters: isNaN(radNum) ? 150 : radNum,
-        radius: isNaN(radNum) ? 150 : radNum
+        radius: isNaN(radNum) ? 150 : radNum,
+        guardsPerShift: !isNaN(quotaNum) && quotaNum > 0 ? quotaNum : (isMain ? 2 : 1)
       });
     });
 
@@ -1087,6 +1156,8 @@ export async function createFirestoreCampus(campusData) {
   const latVal = typeof campusData.lat === 'string' ? parseFloat(campusData.lat) : campusData.lat;
   const lngVal = typeof campusData.lng === 'string' ? parseFloat(campusData.lng) : campusData.lng;
   const radiusVal = parseInt(campusData.radiusMeters || campusData.radius || 150, 10);
+  const isMain = campusId === 'cs-chinh' || campusId === 'cs-caolo' || code === 'CS-CHINH';
+  const quotaVal = parseInt(campusData.guardsPerShift, 10);
   const nowIso = new Date().toISOString();
 
   const cleanCampus = {
@@ -1098,6 +1169,7 @@ export async function createFirestoreCampus(campusData) {
     lng: isNaN(lngVal) ? 106.68071864291426 : lngVal,
     radiusMeters: isNaN(radiusVal) ? 150 : radiusVal,
     radius: isNaN(radiusVal) ? 150 : radiusVal,
+    guardsPerShift: !isNaN(quotaVal) && quotaVal > 0 ? quotaVal : (isMain ? 2 : 1),
     status: campusData.status || 'active',
     createdAt: nowIso
   };
@@ -1129,6 +1201,8 @@ export async function updateFirestoreCampus(campusId, updates) {
   const latVal = typeof updates.lat === 'string' ? parseFloat(updates.lat) : updates.lat;
   const lngVal = typeof updates.lng === 'string' ? parseFloat(updates.lng) : updates.lng;
   const radiusVal = parseInt(updates.radiusMeters || updates.radius || 150, 10);
+  const isMain = campusId === 'cs-chinh' || campusId === 'cs-caolo' || (updates.code || '').toUpperCase() === 'CS-CHINH';
+  const quotaVal = parseInt(updates.guardsPerShift, 10);
   const nowIso = new Date().toISOString();
 
   const cleanUpdates = {
@@ -1138,6 +1212,7 @@ export async function updateFirestoreCampus(campusId, updates) {
     lng: isNaN(lngVal) ? 106.68071864291426 : lngVal,
     radiusMeters: isNaN(radiusVal) ? 150 : radiusVal,
     radius: isNaN(radiusVal) ? 150 : radiusVal,
+    guardsPerShift: !isNaN(quotaVal) && quotaVal > 0 ? quotaVal : (isMain ? 2 : 1),
     updatedAt: nowIso
   };
 
