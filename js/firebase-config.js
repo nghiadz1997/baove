@@ -140,6 +140,202 @@ export function getCurrent24hShiftWindow() {
   return { start, end };
 }
 
+/**
+ * Date & Daily Patrol Helpers (Vietnam / Local Timezone safe, backward compatible with all old logs)
+ */
+export function formatLocalDateKey(dateInput) {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+export function getTodayDateKey() {
+  return formatLocalDateKey(new Date());
+}
+
+export function getYesterdayDateKey() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return formatLocalDateKey(d);
+}
+
+/**
+ * Extract accurate Date from a patrol log (prefers Firebase Server Timestamp if available)
+ */
+export function getLogTimestampDate(log) {
+  if (!log) return new Date(0);
+  const serverTs = log.scannedAtServer || log.createdAt;
+  if (serverTs) {
+    if (typeof serverTs.toDate === 'function') {
+      return serverTs.toDate();
+    }
+    if (typeof serverTs.seconds === 'number') {
+      return new Date(serverTs.seconds * 1000);
+    }
+    if (typeof serverTs === 'string') {
+      const parsed = new Date(serverTs);
+      if (!isNaN(parsed.getTime())) return parsed;
+    }
+  }
+  if (log.scannedAt) {
+    const parsed = new Date(log.scannedAt);
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date(0);
+}
+
+/**
+ * Get YYYY-MM-DD date key for a patrol log
+ */
+export function getLogDateKey(log) {
+  if (!log) return '';
+  if (log.patrolDate && /^\d{4}-\d{2}-\d{2}$/.test(log.patrolDate)) {
+    return log.patrolDate;
+  }
+  return formatLocalDateKey(getLogTimestampDate(log));
+}
+
+/**
+ * Check if a patrol log counts as a valid completed patrol scan
+ */
+export function isPatrolLogValid(log) {
+  if (!log) return false;
+  if (log.verificationStatus === 'flagged_gps_distance' || log.gpsStatus === 'warning_far') {
+    return false;
+  }
+  if (log.distanceMeters !== null && log.distanceMeters !== undefined && log.distanceMeters > 20) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Check whether a checkpoint has at least one guard assigned to cover it
+ */
+export function getAssignedGuardsForCheckpoint(checkpoint, guards) {
+  if (!Array.isArray(guards) || guards.length === 0) return [];
+  if (checkpoint.assignedGuardId) {
+    return guards.filter(g => g.id === checkpoint.assignedGuardId);
+  }
+  const cpCampusId = (checkpoint.campusId || '').trim();
+  const cpCampusName = (checkpoint.campusName || '').trim().toLowerCase();
+
+  // Generic default campus name maps to main campus or any guard
+  const isGenericMain = !cpCampusId && (!cpCampusName || cpCampusName === 'cao đẳng nam sài gòn' || cpCampusName.includes('47 cao lỗ') || cpCampusName.includes('trụ sở chính'));
+
+  const matched = guards.filter(g => {
+    if (cpCampusId && g.campusId === cpCampusId) return true;
+    const gName = (g.campusName || '').trim().toLowerCase();
+    if (cpCampusName && gName && (gName === cpCampusName || gName.includes(cpCampusName) || cpCampusName.includes(gName))) return true;
+    if (isGenericMain && (!g.campusId || g.campusId === 'cs-chinh' || g.campusId === 'cs-caolo' || gName.includes('cao lỗ') || gName.includes('trụ sở chính'))) return true;
+    return false;
+  });
+
+  return matched;
+}
+
+/**
+ * Evaluate 4-state daily status for a checkpoint on a specific dateKey (YYYY-MM-DD):
+ * - 'checked'    (#10b981 - Green):  Scanned validly on selected date
+ * - 'due_soon'   (#f59e0b - Orange): Today, not yet scanned, approaching patrol interval deadline
+ * - 'overdue'    (#ef4444 - Red):    Today, past patrol interval deadline without scan
+ * - 'unchecked'  (#ef4444 - Red):    Not scanned on selected date
+ * - 'unassigned' (#64748b - Gray):   No guard assigned to this checkpoint/campus
+ */
+export function evaluateCheckpointDailyStatus(checkpoint, dateKey, filteredDayLogs, guards, settings = {}) {
+  const cpLogs = (filteredDayLogs || []).filter(l => l.checkpointId === checkpoint.id && isPatrolLogValid(l));
+  if (cpLogs.length > 0) {
+    cpLogs.sort((a, b) => getLogTimestampDate(b) - getLogTimestampDate(a));
+    return {
+      status: 'checked',
+      color: '#10b981',
+      badgeBg: '#d1fae5',
+      badgeText: '#065f46',
+      label: 'Đã quét',
+      latestLog: cpLogs[0],
+      scanCount: cpLogs.length,
+      isOverdue: false,
+      overdueMinutes: 0
+    };
+  }
+
+  const assignedGuards = getAssignedGuardsForCheckpoint(checkpoint, guards);
+  if (assignedGuards.length === 0) {
+    return {
+      status: 'unassigned',
+      color: '#64748b',
+      badgeBg: '#f1f5f9',
+      badgeText: '#475569',
+      label: 'Chưa phân công',
+      latestLog: null,
+      scanCount: 0,
+      isOverdue: false,
+      overdueMinutes: 0
+    };
+  }
+
+  const todayKey = getTodayDateKey();
+  const intervalMin = parseInt(settings?.patrolIntervalMinutes, 10) || 180;
+
+  if (dateKey === todayKey) {
+    const now = new Date();
+    const dayStart = new Date(now);
+    // Measure from 06:00 shift start if current time >= 06:00, else from 00:00 of today
+    if (now.getHours() >= 6) {
+      dayStart.setHours(6, 0, 0, 0);
+    } else {
+      dayStart.setHours(0, 0, 0, 0);
+    }
+    const elapsedMin = Math.max(0, (now.getTime() - dayStart.getTime()) / 60000);
+
+    if (elapsedMin >= intervalMin) {
+      return {
+        status: 'overdue',
+        color: '#ef4444',
+        badgeBg: '#fee2e2',
+        badgeText: '#991b1b',
+        label: 'Quá hạn chưa quét',
+        latestLog: null,
+        scanCount: 0,
+        isOverdue: true,
+        overdueMinutes: Math.round(elapsedMin - intervalMin),
+        assignedGuards
+      };
+    }
+
+    if (elapsedMin >= intervalMin * 0.7) {
+      return {
+        status: 'due_soon',
+        color: '#f59e0b',
+        badgeBg: '#fef3c7',
+        badgeText: '#92400e',
+        label: 'Gần đến hạn kiểm tra',
+        latestLog: null,
+        scanCount: 0,
+        isOverdue: false,
+        minutesRemaining: Math.max(1, Math.round(intervalMin - elapsedMin)),
+        assignedGuards
+      };
+    }
+  }
+
+  return {
+    status: 'unchecked',
+    color: '#ef4444',
+    badgeBg: '#fee2e2',
+    badgeText: '#991b1b',
+    label: 'Chưa quét',
+    latestLog: null,
+    scanCount: 0,
+    isOverdue: false,
+    overdueMinutes: 0,
+    assignedGuards
+  };
+}
+
 let app, db, auth;
 let secondaryApp, secondaryAuth;
 let isFirebaseOnline = false;
@@ -304,17 +500,29 @@ export function initRealtimeFirestoreSync() {
     if (window.renderHomeUI) window.renderHomeUI();
   }, (err) => console.warn('Shifts sync notice:', err.message));
 
-  // 5. Sync PATROL LOGS
-  const qPatrol = query(collection(db, COLLECTIONS.PATROL_LOGS), orderBy('scannedAt', 'desc'), limit(100));
+  // 5. Sync PATROL LOGS (Realtime stream with Firebase Server Timestamp normalization)
+  const qPatrol = query(collection(db, COLLECTIONS.PATROL_LOGS), orderBy('scannedAt', 'desc'), limit(500));
   onSnapshot(qPatrol, (snapshot) => {
     const logs = [];
     snapshot.forEach(docSnap => {
-      logs.push({ id: docSnap.id, ...docSnap.data() });
+      const data = docSnap.data();
+      const tsDate = getLogTimestampDate(data);
+      const isoServer = tsDate.getTime() > 0 ? tsDate.toISOString() : (data.scannedAt || new Date().toISOString());
+      logs.push({
+        ...data,
+        id: docSnap.id,
+        scannedAt: data.scannedAt || isoServer,
+        serverTimeIso: isoServer,
+        patrolDate: data.patrolDate || formatLocalDateKey(tsDate.getTime() > 0 ? tsDate : new Date(data.scannedAt || Date.now()))
+      });
     });
     storage.savePatrolLogs(logs);
     if (window.renderPatrolUI) window.renderPatrolUI();
     if (window.renderHomeUI) window.renderHomeUI();
     if (window.renderManagerMobileUI) window.renderManagerMobileUI();
+    if (window.renderDashboardUI) window.renderDashboardUI();
+    if (window.renderPatrolLogsUI) window.renderPatrolLogsUI();
+    if (window.renderReportsUI) window.renderReportsUI();
   }, (err) => console.warn('Patrol logs sync notice:', err.message));
 
   // 6. Sync INCIDENTS
@@ -650,19 +858,28 @@ export async function verifyAndRecordPatrolCloud(scanData) {
     };
   }
 
+  const nowDate = new Date();
+  const patrolDateKey = formatLocalDateKey(nowDate);
+  const patrolMonthKey = patrolDateKey.slice(0, 7);
+  const resolvedShiftName = guard?.fixedShiftName || guard?.currentShiftName || shift?.name || 'Ca Trực 24H (06:00 - 06:00 hôm sau)';
+
   const logEntry = {
     checkpointId: checkpoint.id,
     checkpointCode: checkpoint.code,
     checkpointName: checkpoint.name,
-    campusName: checkpoint.campusName || 'Cao Đẳng Nam Sài Gòn',
+    campusId: checkpoint.campusId || campus?.id || 'cs-chinh',
+    campusName: checkpoint.campusName || campus?.name || 'Cao Đẳng Nam Sài Gòn',
     zoneName: checkpoint.zoneName || '',
     floor: checkpoint.floor || '',
     guardId: guard.id,
     guardName: `${guard.name} (${guard.code})`,
     guardEmail: guard.email || '',
-    shiftId: shift?.id || 'default',
-    shiftName: shift?.name || 'Ca trực hiện tại',
-    scannedAt: new Date().toISOString(),
+    shiftId: shift?.id || 'ca-24h',
+    shiftName: resolvedShiftName,
+    patrolDate: patrolDateKey,
+    patrolMonth: patrolMonthKey,
+    scannedAt: nowDate.toISOString(),
+    serverTimeIso: nowDate.toISOString(),
     distanceMeters: distanceMeters !== null ? Math.round(distanceMeters * 10) / 10 : null,
     accuracy: userLocation?.accuracy ? Math.round(userLocation.accuracy) : null,
     guardCoordinates: userLocation ? { lat: userLocation.lat, lng: userLocation.lng } : null,
@@ -671,12 +888,14 @@ export async function verifyAndRecordPatrolCloud(scanData) {
     notes: `Đã kiểm tra an toàn tại vị trí chốt (Cách ${Math.round(distanceMeters || 0)}m ≤ ${maxAllowed}m)`
   };
 
+  // Every scan is always stored as a brand-new separate record (never overwrites previous logs)
   storage.addPatrolLog({ id: 'log-' + Date.now(), ...logEntry });
 
   if (isFirebaseOnline && db) {
     try {
       await addDoc(collection(db, COLLECTIONS.PATROL_LOGS), {
         ...logEntry,
+        scannedAtServer: serverTimestamp(),
         createdAt: serverTimestamp()
       });
     } catch (e) {
@@ -693,6 +912,80 @@ export async function verifyAndRecordPatrolCloud(scanData) {
     isGpsValid: true,
     message: `Xác thực thành công chốt ${checkpoint.name} (Khoảng cách: ${logEntry.distanceMeters}m ≤ ${maxAllowed}m)!`
   };
+}
+
+// In-memory cache for historical date-range queries (reduces Firestore reads/costs)
+const historicalLogCache = new Map();
+
+/**
+ * Fetch patrol logs for any date range [startDateKey, endDateKey] (YYYY-MM-DD)
+ * Uses single-field index on `scannedAt` (no custom composite index needed) and merges with realtime cache.
+ */
+export async function fetchPatrolLogsByDateRange(startDateKey, endDateKey, forceRefresh = false) {
+  const cacheKey = `${startDateKey}_${endDateKey}`;
+  const todayKey = getTodayDateKey();
+
+  // Merge helper with local realtime cache
+  const mergeWithRealtime = (fetchedList) => {
+    const realtime = storage.getPatrolLogs();
+    const map = new Map();
+    fetchedList.forEach(l => map.set(l.id, l));
+    realtime.forEach(l => {
+      const dk = getLogDateKey(l);
+      if (dk >= startDateKey && dk <= endDateKey) {
+        map.set(l.id, l);
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => getLogTimestampDate(b) - getLogTimestampDate(a));
+  };
+
+  // Use cached result for strictly past ranges to avoid duplicate Firestore reads
+  if (!forceRefresh && endDateKey < todayKey && historicalLogCache.has(cacheKey)) {
+    return mergeWithRealtime(historicalLogCache.get(cacheKey));
+  }
+
+  if (!isFirebaseOnline || !db) {
+    return mergeWithRealtime([]);
+  }
+
+  try {
+    // Expand UTC query bounds by 1 day on each side to account for UTC+7 local dates safely
+    const startDt = new Date(`${startDateKey}T00:00:00`);
+    startDt.setDate(startDt.getDate() - 1);
+    const endDt = new Date(`${endDateKey}T23:59:59.999`);
+    endDt.setDate(endDt.getDate() + 1);
+
+    const q = query(
+      collection(db, COLLECTIONS.PATROL_LOGS),
+      where('scannedAt', '>=', startDt.toISOString()),
+      where('scannedAt', '<=', endDt.toISOString()),
+      orderBy('scannedAt', 'desc'),
+      limit(1500)
+    );
+    const snap = await getDocs(q);
+    const results = [];
+    snap.forEach(docSnap => {
+      const data = docSnap.data();
+      const tsDate = getLogTimestampDate(data);
+      const isoServer = tsDate.getTime() > 0 ? tsDate.toISOString() : (data.scannedAt || '');
+      const dk = data.patrolDate || formatLocalDateKey(tsDate.getTime() > 0 ? tsDate : new Date(data.scannedAt || 0));
+      if (dk >= startDateKey && dk <= endDateKey) {
+        results.push({
+          ...data,
+          id: docSnap.id,
+          scannedAt: data.scannedAt || isoServer,
+          serverTimeIso: isoServer,
+          patrolDate: dk
+        });
+      }
+    });
+
+    historicalLogCache.set(cacheKey, results);
+    return mergeWithRealtime(results);
+  } catch (err) {
+    console.warn('Historical patrol query notice (falling back to realtime cache):', err.message);
+    return mergeWithRealtime([]);
+  }
 }
 
 export function calculateHaversineDistance(lat1, lon1, lat2, lon2) {

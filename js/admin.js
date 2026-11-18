@@ -19,7 +19,15 @@ import {
   SUPER_ADMIN_EMAIL,
   OFFICIAL_CAMPUSES,
   DEFAULT_SHIFTS,
-  COLLECTIONS
+  COLLECTIONS,
+  formatLocalDateKey,
+  getTodayDateKey,
+  getYesterdayDateKey,
+  getLogTimestampDate,
+  getLogDateKey,
+  isPatrolLogValid,
+  evaluateCheckpointDailyStatus,
+  fetchPatrolLogsByDateRange
 } from "./firebase-config.js";
 
 class AdminDesktopModule {
@@ -31,6 +39,26 @@ class AdminDesktopModule {
     this.adminMapType = 'roadmap';
     this.adminMapLayer = null;
     this.adminSatLayer = null;
+
+    // Daily Dashboard & Google Maps filter state
+    this.dashboardDate = getTodayDateKey();
+    this.dashboardShift = 'all';
+    this.dashboardGuard = 'all';
+    this.dashboardCampus = 'all';
+    this.dashboardLogsCache = null;
+
+    // Patrol Logs filter state
+    this.logFilterFrom = getTodayDateKey();
+    this.logFilterTo = getTodayDateKey();
+    this.logFilterShift = 'all';
+    this.logFilterGuard = 'all';
+    this.logFilterMode = 'today';
+    this.logFilterLogsCache = null;
+
+    // Monthly Report state
+    this.reportMonth = getTodayDateKey().slice(0, 7);
+    this.reportCampus = 'all';
+    this.reportLogsCache = null;
 
     // Coordinate picker modal state
     this.pickerMap = null;
@@ -131,32 +159,180 @@ class AdminDesktopModule {
   }
 
   /**
-   * 1. Dashboard with Google Maps & Campus Selector
+   * Helper: Filter logs by dateKey, shiftName, guardId
+   */
+  filterLogsByCriteria(allLogs, { dateKey = null, fromDate = null, toDate = null, shiftFilter = 'all', guardFilter = 'all' } = {}) {
+    return (allLogs || []).filter(l => {
+      const dk = getLogDateKey(l);
+      if (dateKey && dk !== dateKey) return false;
+      if (fromDate && dk < fromDate) return false;
+      if (toDate && dk > toDate) return false;
+      if (shiftFilter && shiftFilter !== 'all') {
+        const sName = (l.shiftName || '').toLowerCase();
+        if (!sName.includes(shiftFilter.toLowerCase())) return false;
+      }
+      if (guardFilter && guardFilter !== 'all') {
+        if (l.guardId !== guardFilter) return false;
+      }
+      return true;
+    });
+  }
+
+  async setDashboardDate(dateKey) {
+    if (!dateKey) return;
+    this.dashboardDate = dateKey;
+    const todayKey = getTodayDateKey();
+    if (dateKey !== todayKey) {
+      this.dashboardLogsCache = await fetchPatrolLogsByDateRange(dateKey, dateKey);
+    } else {
+      this.dashboardLogsCache = null;
+    }
+    this.renderDashboard(document.getElementById('admin-content-pane'));
+  }
+
+  setDashboardShift(shiftVal) {
+    this.dashboardShift = shiftVal || 'all';
+    this.renderDashboard(document.getElementById('admin-content-pane'));
+  }
+
+  setDashboardGuard(guardVal) {
+    this.dashboardGuard = guardVal || 'all';
+    this.renderDashboard(document.getElementById('admin-content-pane'));
+  }
+
+  setDashboardCampus(campusVal) {
+    this.dashboardCampus = campusVal || 'all';
+    this.renderDashboard(document.getElementById('admin-content-pane'));
+  }
+
+  focusCheckpointOnMap(lat, lng) {
+    if (this.adminGoogleMap && lat && lng) {
+      this.adminGoogleMap.flyTo([parseFloat(lat), parseFloat(lng)], 19, { duration: 1.0 });
+      const mapEl = document.getElementById('admin-google-map');
+      if (mapEl) mapEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  /**
+   * 1. Dashboard with Daily Patrol Status, Progress Tracking, Google Maps Filters & Overdue Alerts
    */
   renderDashboard(container) {
-    const checkpoints = storage.getCheckpoints();
-    const patrolLogs = storage.getPatrolLogs();
+    if (!container) return;
+    const allCheckpoints = storage.getCheckpoints();
+    const rawLogs = this.dashboardLogsCache !== null ? this.dashboardLogsCache : storage.getPatrolLogs();
     const incidents = storage.getIncidents();
     const users = storage.getUsers();
+    const shifts = storage.getShifts();
+    const settings = storage.getSettings();
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+    const shiftList = shifts.length > 0 ? shifts : DEFAULT_SHIFTS;
 
     const guards = users.filter(u => u.role === 'guard');
     const onDutyCount = guards.filter(g => g.status === 'on_duty').length;
     const unresolvedIncidents = incidents.filter(i => i.status !== 'resolved').length;
-    const distanceWarnings = patrolLogs.filter(l => l.gpsStatus === 'warning_far').length;
 
-    let checkedCps = 0;
-    checkpoints.forEach(cp => {
-      if (patrolLogs.some(l => l.checkpointId === cp.id)) checkedCps++;
+    // Filter checkpoints by selected campus
+    const selectedCampusObj = this.dashboardCampus !== 'all' ? campusList.find(c => c.id === this.dashboardCampus) : null;
+    const checkpoints = allCheckpoints.filter(cp => {
+      if (this.dashboardCampus === 'all') return true;
+      if (cp.campusId && cp.campusId === this.dashboardCampus) return true;
+      if (selectedCampusObj && cp.campusName && cp.campusName.toLowerCase().includes((selectedCampusObj.name || '').toLowerCase().split('-')[0].trim())) return true;
+      return false;
     });
-    const completionRate = checkpoints.length > 0 ? Math.round((checkedCps / checkpoints.length) * 100) : 0;
 
-    const campuses = storage.getCampuses();
-    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+    // Filter logs strictly for selected date + shift + guard (NEVER carries over previous day!)
+    const dayLogs = this.filterLogsByCriteria(rawLogs, {
+      dateKey: this.dashboardDate,
+      shiftFilter: this.dashboardShift,
+      guardFilter: this.dashboardGuard
+    });
+
+    const distanceWarnings = dayLogs.filter(l => l.gpsStatus === 'warning_far').length;
+
+    // Evaluate 4-state daily status for every checkpoint
+    const cpStatuses = new Map();
+    let checkedCps = 0;
+    let uncheckedCps = 0;
+    let dueSoonCps = 0;
+    let unassignedCps = 0;
+    const overdueList = [];
+
+    checkpoints.forEach(cp => {
+      const st = evaluateCheckpointDailyStatus(cp, this.dashboardDate, dayLogs, guards, settings);
+      cpStatuses.set(cp.id, st);
+      if (st.status === 'checked') checkedCps++;
+      else if (st.status === 'due_soon') dueSoonCps++;
+      else if (st.status === 'unassigned') unassignedCps++;
+      else uncheckedCps++;
+
+      if (st.isOverdue) {
+        overdueList.push({ cp, st });
+      }
+    });
+
+    const totalMustPatrol = checkpoints.length;
+    const totalRemaining = Math.max(0, totalMustPatrol - checkedCps);
+    const completionRate = totalMustPatrol > 0 ? Math.round((checkedCps / totalMustPatrol) * 100) : 0;
+
+    // Latest scan details for selected date
+    const validDayLogs = dayLogs.filter(l => isPatrolLogValid(l));
+    const latestScan = validDayLogs[0] || dayLogs[0] || null;
+    const latestScanTimeStr = latestScan
+      ? `${getLogTimestampDate(latestScan).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} (${getLogDateKey(latestScan).split('-').reverse().join('/')})`
+      : 'Chưa có lượt quét';
+    const latestGuardName = latestScan ? latestScan.guardName : 'Chưa có nhân viên quét';
+    const activeShiftLabel = this.dashboardShift !== 'all'
+      ? this.dashboardShift
+      : (latestScan?.shiftName || shiftList[0]?.name || 'Ca Trực 24H (06:00 - 06:00 hôm sau)');
+
+    const todayKey = getTodayDateKey();
+    const yesterdayKey = getYesterdayDateKey();
+    const isViewingToday = this.dashboardDate === todayKey;
+    const isViewingYesterday = this.dashboardDate === yesterdayKey;
+    const displayDateVN = this.dashboardDate.split('-').reverse().join('/');
 
     container.innerHTML = `
-      <div class="space-y-6">
+      <div class="space-y-5">
+        <!-- Overdue Patrol Alert Banner -->
+        ${overdueList.length > 0 && isViewingToday ? `
+          <div class="bg-rose-50 dark:bg-rose-950/50 border border-rose-300 dark:border-rose-800 rounded-2xl p-4 shadow-sm space-y-2.5">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <div class="flex items-center gap-2.5">
+                <div class="w-9 h-9 rounded-xl bg-rose-600 text-white flex items-center justify-center text-base shrink-0 animate-pulse">
+                  <i class="fa-solid fa-bell"></i>
+                </div>
+                <div>
+                  <h4 class="font-extrabold text-sm text-rose-800 dark:text-rose-200">
+                    Cảnh báo tuần tra quá hạn (${overdueList.length} chốt chưa được quét hôm nay)
+                  </h4>
+                  <p class="text-xs text-rose-600 dark:text-rose-300">
+                    Đã quá thời gian quy định (${settings.patrolIntervalMinutes || 180} phút) kể từ đầu ca nhưng bảo vệ chưa quét mã QR tại các chốt sau:
+                  </p>
+                </div>
+              </div>
+              <span class="px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-600 text-white">Cần kiểm tra ngay</span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
+              ${overdueList.slice(0, 6).map(({ cp, st }) => `
+                <div class="p-2.5 rounded-xl bg-white dark:bg-slate-900/80 border border-rose-200 dark:border-rose-900 flex items-center justify-between gap-2 text-xs">
+                  <div class="min-w-0">
+                    <div class="font-bold text-slate-800 dark:text-slate-100 truncate">${cp.name}</div>
+                    <div class="text-[11px] text-rose-600 dark:text-rose-400">Quá hạn ~${st.overdueMinutes} phút • ${cp.zoneName || cp.campusName || ''}</div>
+                  </div>
+                  ${cp.lat && cp.lng ? `
+                    <button onclick="window.adminModule.focusCheckpointOnMap(${cp.lat}, ${cp.lng})" class="px-2 py-1 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-[10px] shrink-0">
+                      <i class="fa-solid fa-location-crosshairs"></i> Xem
+                    </button>
+                  ` : ''}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+
         <!-- Top Stats Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-between">
             <div>
               <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Lực lượng bảo vệ</p>
@@ -170,9 +346,9 @@ class AdminDesktopModule {
 
           <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-between">
             <div>
-              <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Tiến độ tuần tra chốt</p>
-              <h3 class="text-3xl font-extrabold text-emerald-600 mt-1">${completionRate}%</h3>
-              <p class="text-xs text-slate-500 mt-1">Đã kiểm tra ${checkedCps}/${checkpoints.length} điểm chốt</p>
+              <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Tiến độ ngày ${displayDateVN}</p>
+              <h3 class="text-3xl font-extrabold ${completionRate === 100 && totalMustPatrol > 0 ? 'text-emerald-600' : 'text-blue-600'} mt-1">${completionRate}%</h3>
+              <p class="text-xs text-slate-500 mt-1">Đã quét <strong class="text-emerald-600">${checkedCps}</strong> / <strong>${totalMustPatrol}</strong> • Chưa quét: <strong class="text-rose-600">${totalRemaining}</strong></p>
             </div>
             <div class="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-xl">
               <i class="fa-solid fa-route"></i>
@@ -182,7 +358,7 @@ class AdminDesktopModule {
           <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-between">
             <div>
               <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Sự cố ghi nhận</p>
-              <h3 class="text-3xl font-extrabold ${unresolvedIncidents > 0 ? 'text-rose-600' : 'text-slate-700'} mt-1">${unresolvedIncidents}</h3>
+              <h3 class="text-3xl font-extrabold ${unresolvedIncidents > 0 ? 'text-rose-600' : 'text-slate-700 dark:text-slate-200'} mt-1">${unresolvedIncidents}</h3>
               <p class="text-xs text-slate-500 mt-1">Chờ xử lý / Đang xử lý</p>
             </div>
             <div class="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center text-xl">
@@ -192,9 +368,9 @@ class AdminDesktopModule {
 
           <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-between">
             <div>
-              <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Cảnh báo vị trí GPS</p>
-              <h3 class="text-3xl font-extrabold ${distanceWarnings > 0 ? 'text-amber-500' : 'text-slate-700'} mt-1">${distanceWarnings}</h3>
-              <p class="text-xs text-slate-500 mt-1">Quét ngoài bán kính an toàn</p>
+              <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Cảnh báo tuần tra</p>
+              <h3 class="text-3xl font-extrabold ${(overdueList.length + distanceWarnings) > 0 ? 'text-amber-500' : 'text-slate-700 dark:text-slate-200'} mt-1">${overdueList.length + distanceWarnings}</h3>
+              <p class="text-xs text-slate-500 mt-1">Quá hạn: <strong>${overdueList.length}</strong> • GPS: <strong>${distanceWarnings}</strong></p>
             </div>
             <div class="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center text-xl">
               <i class="fa-solid fa-location-crosshairs"></i>
@@ -202,30 +378,110 @@ class AdminDesktopModule {
           </div>
         </div>
 
+        <!-- Detailed Daily Patrol Progress Strip -->
+        <div class="bg-white dark:bg-slate-800 rounded-2xl p-4 border border-slate-200 dark:border-slate-700 shadow-sm space-y-3">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 font-bold text-xs">
+                <i class="fa-solid fa-calendar-day mr-1"></i> Tiến Độ Tuần Tra Ngày ${displayDateVN} ${isViewingToday ? '(Hôm nay)' : (isViewingYesterday ? '(Hôm qua)' : '(Lịch sử)')}
+              </span>
+              <span class="text-xs text-slate-500">Ca trực: <strong class="text-slate-700 dark:text-slate-200">${activeShiftLabel}</strong></span>
+            </div>
+            <div class="text-xs font-extrabold text-emerald-600 font-mono">${completionRate}% hoàn thành</div>
+          </div>
+
+          <div class="w-full h-2.5 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-blue-600 to-emerald-500 rounded-full transition-all duration-500" style="width: ${completionRate}%"></div>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 text-xs pt-1">
+            <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/70 dark:border-slate-700/70">
+              <div class="text-[10px] text-slate-400 uppercase font-bold">Tổng chốt phải quét</div>
+              <div class="text-base font-extrabold text-slate-800 dark:text-slate-100 font-mono mt-0.5">${totalMustPatrol}</div>
+            </div>
+            <div class="p-2.5 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/70 dark:border-emerald-900">
+              <div class="text-[10px] text-emerald-600 uppercase font-bold">Đã quét hợp lệ</div>
+              <div class="text-base font-extrabold text-emerald-700 dark:text-emerald-400 font-mono mt-0.5">${checkedCps}</div>
+            </div>
+            <div class="p-2.5 rounded-xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200/70 dark:border-rose-900">
+              <div class="text-[10px] text-rose-600 uppercase font-bold">Chưa quét</div>
+              <div class="text-base font-extrabold text-rose-700 dark:text-rose-400 font-mono mt-0.5">${totalRemaining}</div>
+            </div>
+            <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/70 dark:border-slate-700/70">
+              <div class="text-[10px] text-slate-400 uppercase font-bold">Quét gần nhất</div>
+              <div class="text-xs font-bold text-slate-800 dark:text-slate-100 font-mono mt-1 truncate" title="${latestScanTimeStr}">${latestScanTimeStr}</div>
+            </div>
+            <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/70 dark:border-slate-700/70">
+              <div class="text-[10px] text-slate-400 uppercase font-bold">Bảo vệ thực hiện</div>
+              <div class="text-xs font-bold text-blue-700 dark:text-blue-300 mt-1 truncate" title="${latestGuardName}">${latestGuardName}</div>
+            </div>
+            <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200/70 dark:border-slate-700/70">
+              <div class="text-[10px] text-slate-400 uppercase font-bold">Lượt quét trong ngày</div>
+              <div class="text-base font-extrabold text-blue-600 dark:text-blue-400 font-mono mt-0.5">${dayLogs.length} lượt</div>
+            </div>
+          </div>
+        </div>
+
         <!-- Google Maps Section -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div class="lg:col-span-2 bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col">
-            <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div class="lg:col-span-2 bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col space-y-3">
+            <div class="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <h4 class="font-bold text-base text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                  <i class="fa-solid fa-map-location-dot text-blue-600"></i> Bản Đồ Google Maps Giám Sát Vị Trí Chốt
+                  <i class="fa-solid fa-map-location-dot text-blue-600"></i> Bản Đồ Google Maps Giám Sát Chốt Theo Ngày
                 </h4>
-                <p class="text-xs text-slate-500">Định vị trực tiếp các chốt an ninh trường Cao đẳng Nam Sài Gòn</p>
+                <p class="text-xs text-slate-500">Đang xem trạng thái tuần tra ngày <strong>${displayDateVN}</strong> • Tự động reset mỗi ngày mới</p>
               </div>
               <div class="flex items-center gap-2">
-                <select id="admin-map-campus-filter" class="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-600 text-xs font-bold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200">
-                  <option value="all">Tất cả phân hiệu (Mặc định: 47 Cao Lỗ)</option>
-                  ${campusList.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}
-                </select>
                 <button id="btn-admin-map-toggle" class="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-600 text-xs font-bold hover:bg-slate-50 dark:hover:bg-slate-700">
-                  <i class="fa-solid fa-layer-group mr-1"></i> Xem Vệ tinh
+                  <i class="fa-solid fa-layer-group mr-1"></i> ${this.adminMapType === 'satellite' ? 'Xem Bản đồ' : 'Xem Vệ tinh'}
                 </button>
                 <button onclick="window.adminModule.zoomAdminToMyLocation()" class="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition">
                   <i class="fa-solid fa-crosshairs mr-1"></i> Vị trí của tôi
                 </button>
               </div>
             </div>
+
+            <!-- Google Maps Filter Toolbar (Date, Shift, Guard, Campus) -->
+            <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 flex items-center flex-wrap gap-2 text-xs">
+              <div class="flex items-center gap-1">
+                <button onclick="window.adminModule.setDashboardDate('${todayKey}')" class="px-2.5 py-1.5 rounded-lg font-bold transition ${isViewingToday ? 'bg-blue-600 text-white shadow-xs' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'}">
+                  Hôm nay
+                </button>
+                <button onclick="window.adminModule.setDashboardDate('${yesterdayKey}')" class="px-2.5 py-1.5 rounded-lg font-bold transition ${isViewingYesterday ? 'bg-blue-600 text-white shadow-xs' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'}">
+                  Hôm qua
+                </button>
+                <input type="date" id="admin-map-date-picker" value="${this.dashboardDate}" onchange="window.adminModule.setDashboardDate(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200">
+              </div>
+
+              <select id="admin-map-shift-filter" onchange="window.adminModule.setDashboardShift(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200">
+                <option value="all" ${this.dashboardShift === 'all' ? 'selected' : ''}>Tất cả ca trực</option>
+                ${shiftList.map(s => `<option value="${s.name}" ${this.dashboardShift === s.name ? 'selected' : ''}>${s.name}</option>`).join('')}
+              </select>
+
+              <select id="admin-map-guard-filter" onchange="window.adminModule.setDashboardGuard(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200">
+                <option value="all" ${this.dashboardGuard === 'all' ? 'selected' : ''}>Tất cả bảo vệ</option>
+                ${guards.map(g => `<option value="${g.id}" ${this.dashboardGuard === g.id ? 'selected' : ''}>${g.name} (${g.code})</option>`).join('')}
+              </select>
+
+              <select id="admin-map-campus-filter" onchange="window.adminModule.setDashboardCampus(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200">
+                <option value="all" ${this.dashboardCampus === 'all' ? 'selected' : ''}>Tất cả cơ sở</option>
+                ${campusList.map(c => `<option value="${c.id}" ${this.dashboardCampus === c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
+              </select>
+            </div>
+
             <div id="admin-google-map" class="w-full h-96 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 z-10"></div>
+
+            <!-- 4-Color Status Legend -->
+            <div class="flex items-center justify-between flex-wrap gap-2 pt-1 text-xs">
+              <div class="flex items-center flex-wrap gap-3 font-semibold text-slate-600 dark:text-slate-300">
+                <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-emerald-500 border border-white shadow-xs"></span> Đã quét (<strong class="text-emerald-600">${checkedCps}</strong>)</span>
+                <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-rose-500 border border-white shadow-xs"></span> Chưa quét / Quá hạn (<strong class="text-rose-600">${uncheckedCps}</strong>)</span>
+                <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-amber-500 border border-white shadow-xs"></span> Gần đến hạn (<strong class="text-amber-600">${dueSoonCps}</strong>)</span>
+                <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-slate-500 border border-white shadow-xs"></span> Chưa phân công (<strong class="text-slate-500">${unassignedCps}</strong>)</span>
+              </div>
+              <span class="text-[11px] text-slate-400 font-mono">Định mức cảnh báo: ${settings.patrolIntervalMinutes || 180} phút</span>
+            </div>
           </div>
 
           <!-- Quick Actions & User Roster -->
@@ -238,7 +494,7 @@ class AdminDesktopModule {
                 </button>
               </div>
               
-              <div class="space-y-3 overflow-y-auto max-h-80 pr-1">
+              <div class="space-y-3 overflow-y-auto max-h-96 pr-1">
                 ${guards.length === 0 ? `
                   <div class="py-8 text-center text-xs text-slate-400">
                     Chưa có nhân viên bảo vệ trong Firestore.<br>
@@ -246,19 +502,21 @@ class AdminDesktopModule {
                   </div>
                 ` : guards.map(g => {
                   const isOn = g.status === 'on_duty';
+                  const guardDayScans = dayLogs.filter(l => l.guardId === g.id && isPatrolLogValid(l)).length;
                   return `
                     <div class="p-3 rounded-xl border border-slate-100 dark:border-slate-700 flex items-center justify-between">
-                      <div class="flex items-center gap-3">
-                        <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" class="w-10 h-10 rounded-full object-cover">
-                        <div>
-                          <div class="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                      <div class="flex items-center gap-3 min-w-0">
+                        <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" class="w-10 h-10 rounded-full object-cover shrink-0">
+                        <div class="min-w-0">
+                          <div class="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-1.5 truncate">
                             ${g.name}
-                            <span class="text-[10px] text-blue-600 font-bold">(${g.fixedShiftName || 'Ca Trực 24H'})</span>
+                            <span class="text-[10px] text-blue-600 font-bold">(${g.code})</span>
                           </div>
-                          <div class="text-[11px] text-slate-500">${g.code} • ${g.campusName || 'Trụ sở Cao Lỗ'}</div>
+                          <div class="text-[11px] text-slate-500 truncate">${g.fixedShiftName || 'Ca Trực 24H'}</div>
+                          <div class="text-[10px] text-emerald-600 font-bold">Ngày ${displayDateVN}: ${guardDayScans} lượt quét</div>
                         </div>
                       </div>
-                      <div class="flex items-center gap-1.5">
+                      <div class="flex items-center gap-1.5 shrink-0">
                         <span class="px-2 py-0.5 rounded text-[10px] font-bold ${isOn ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}">
                           ${isOn ? 'Đang trực' : 'Nghỉ ca'}
                         </span>
@@ -283,41 +541,42 @@ class AdminDesktopModule {
           </div>
         </div>
 
-        <!-- Recent Patrol Log Table -->
+        <!-- Recent Patrol Log Table for Selected Date -->
         <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm">
           <div class="flex items-center justify-between mb-4">
-            <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Nhật Ký Quét QR Gần Nhất (Firestore Realtime)</h4>
+            <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Nhật Ký Quét QR Ngày ${displayDateVN} (${dayLogs.length} bản ghi)</h4>
             <button onclick="window.adminModule.switchModule('patrol_logs')" class="text-xs font-bold text-blue-600 hover:underline">
-              Xem tất cả nhật ký &rarr;
+              Xem tất cả nhật ký & Xuất Excel &rarr;
             </button>
           </div>
           <div class="overflow-x-auto">
             <table class="w-full text-left text-xs text-slate-600 dark:text-slate-300">
               <thead class="bg-slate-50 dark:bg-slate-900/50 text-slate-500 uppercase text-[11px]">
                 <tr>
-                  <th class="p-3">Thời gian</th>
+                  <th class="p-3">Ngày & Giờ quét</th>
                   <th class="p-3">Điểm chốt</th>
-                  <th class="p-3">Khu vực</th>
+                  <th class="p-3">Ca trực</th>
                   <th class="p-3">Nhân viên</th>
                   <th class="p-3">Khoảng cách GPS</th>
                   <th class="p-3">Trạng thái</th>
-                  <th class="p-3 text-right">Google Maps</th>
+                  <th class="p-3 text-right">Tọa độ GPS</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
-                ${patrolLogs.length === 0 ? `
-                  <tr><td colspan="7" class="p-6 text-center text-slate-400">Chưa có lượt tuần tra nào được quét.</td></tr>
-                ` : patrolLogs.slice(0, 6).map(l => {
-                  const isValid = l.gpsStatus === 'valid' || l.verificationStatus === 'verified_cloud';
+                ${dayLogs.length === 0 ? `
+                  <tr><td colspan="7" class="p-6 text-center text-slate-400">Chưa có lượt tuần tra nào được ghi nhận trong ngày ${displayDateVN}.</td></tr>
+                ` : dayLogs.slice(0, 8).map(l => {
+                  const isValid = isPatrolLogValid(l);
+                  const ts = getLogTimestampDate(l);
                   const gmapLink = l.guardCoordinates ? `https://www.google.com/maps?q=${l.guardCoordinates.lat},${l.guardCoordinates.lng}` : '#';
                   return `
                     <tr class="hover:bg-slate-50/50">
-                      <td class="p-3 font-mono font-semibold">${new Date(l.scannedAt).toLocaleTimeString('vi-VN')}</td>
-                      <td class="p-3 font-bold text-slate-800 dark:text-slate-100">${l.checkpointName}</td>
-                      <td class="p-3">${l.zoneName} (${l.floor})</td>
-                      <td class="p-3">${l.guardName}</td>
+                      <td class="p-3 font-mono font-semibold">${ts.toLocaleTimeString('vi-VN')} <span class="text-slate-400 font-normal">(${ts.toLocaleDateString('vi-VN')})</span></td>
+                      <td class="p-3 font-bold text-slate-800 dark:text-slate-100">${l.checkpointName} <span class="text-[10px] font-mono text-slate-400">${l.checkpointCode || ''}</span></td>
+                      <td class="p-3 text-[11px]">${l.shiftName || 'Ca Trực 24H'}</td>
+                      <td class="p-3 font-semibold">${l.guardName}</td>
                       <td class="p-3 font-semibold ${isValid ? 'text-emerald-600' : 'text-amber-600'}">
-                        ${l.distanceMeters !== null ? l.distanceMeters + 'm' : '—'}
+                        ${l.distanceMeters !== null && l.distanceMeters !== undefined ? l.distanceMeters + 'm' : '—'}
                       </td>
                       <td class="p-3">
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isValid ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">
@@ -326,8 +585,8 @@ class AdminDesktopModule {
                       </td>
                       <td class="p-3 text-right">
                         ${l.guardCoordinates ? `
-                          <a href="${gmapLink}" target="_blank" class="text-blue-600 font-bold hover:underline">
-                            <i class="fa-solid fa-arrow-up-right-from-square"></i> Xem Map
+                          <a href="${gmapLink}" target="_blank" class="text-blue-600 font-bold hover:underline font-mono text-[11px]">
+                            <i class="fa-solid fa-location-dot mr-0.5"></i> ${Number(l.guardCoordinates.lat).toFixed(5)}, ${Number(l.guardCoordinates.lng).toFixed(5)}
                           </a>
                         ` : '—'}
                       </td>
@@ -342,19 +601,12 @@ class AdminDesktopModule {
     `;
 
     setTimeout(() => {
-      this.initAdminGoogleMap(checkpoints, patrolLogs);
+      this.initAdminGoogleMap(checkpoints, cpStatuses);
       this.bindAdminMapEvents();
-    }, 100);
+    }, 80);
   }
 
   bindAdminMapEvents() {
-    const campusSelect = document.getElementById('admin-map-campus-filter');
-    if (campusSelect) {
-      campusSelect.addEventListener('change', (e) => {
-        this.panAdminMapToCampus(e.target.value);
-      });
-    }
-
     const toggleBtn = document.getElementById('btn-admin-map-toggle');
     if (toggleBtn) {
       toggleBtn.addEventListener('click', () => {
@@ -401,6 +653,7 @@ class AdminDesktopModule {
     }
     const radius = campus.radiusMeters || campus.radius || 150;
     this.adminCampusCircle = L.circle([campus.lat, campus.lng], {
+      radius: radius,
       color: '#2563eb',
       fillColor: '#3b82f6',
       fillOpacity: 0.12,
@@ -411,16 +664,19 @@ class AdminDesktopModule {
     this.adminCampusCircle.bindTooltip(`${campus.name} (Bán kính ${radius}m)`, { permanent: false, direction: 'top' });
   }
 
-  initAdminGoogleMap(checkpoints, patrolLogs) {
+  initAdminGoogleMap(checkpoints, cpStatuses = new Map()) {
     const mapEl = document.getElementById('admin-google-map');
     if (!mapEl || !window.L) return;
 
-    // Center on Trụ sở chính Nam Sài Gòn (or custom coordinates)
     const campuses = storage.getCampuses();
     const list = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
-    const main = list.find(c => c.id === 'cs-chinh' || c.id === 'cs-caolo') || list[0];
-    let centerLat = main?.lat || 10.735768115549721;
-    let centerLng = main?.lng || 106.68071864291426;
+    const targetCampus = this.dashboardCampus !== 'all'
+      ? list.find(c => c.id === this.dashboardCampus)
+      : (list.find(c => c.id === 'cs-chinh' || c.id === 'cs-caolo') || list[0]);
+
+    const centerLat = parseFloat(targetCampus?.lat) || 10.735768115549721;
+    const centerLng = parseFloat(targetCampus?.lng) || 106.68071864291426;
+    const zoomLvl = this.dashboardCampus !== 'all' ? 18 : 17;
 
     if (this.adminGoogleMap) {
       this.adminGoogleMap.remove();
@@ -430,55 +686,91 @@ class AdminDesktopModule {
     this.adminGoogleMap = L.map('admin-google-map', {
       zoomControl: true,
       attributionControl: false
-    }).setView([centerLat, centerLng], 17);
+    }).setView([centerLat, centerLng], zoomLvl);
 
     this.adminMapLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
       maxZoom: 20,
       subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
-    }).addTo(this.adminGoogleMap);
+    });
 
     this.adminSatLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
       maxZoom: 20,
       subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
     });
 
+    if (this.adminMapType === 'satellite') {
+      this.adminSatLayer.addTo(this.adminGoogleMap);
+    } else {
+      this.adminMapLayer.addTo(this.adminGoogleMap);
+    }
+
     this.adminMapMarkersGroup = L.layerGroup().addTo(this.adminGoogleMap);
 
-    // Initial boundary for Cao Lỗ
-    if (main) this.drawAdminCampusCircle(main);
+    if (targetCampus) this.drawAdminCampusCircle(targetCampus);
 
-    // Add Checkpoint Markers
+    const displayDateVN = this.dashboardDate.split('-').reverse().join('/');
+
+    // Add 4-Color Daily Status Checkpoint Markers
     checkpoints.forEach(cp => {
       if (!cp.lat || !cp.lng) return;
-      const isChecked = patrolLogs.some(log => log.checkpointId === cp.id);
-      const color = isChecked ? '#10b981' : '#f59e0b';
+      const st = cpStatuses.get(cp.id) || {
+        status: 'unchecked',
+        color: '#ef4444',
+        badgeBg: '#fee2e2',
+        badgeText: '#991b1b',
+        label: 'Chưa quét',
+        latestLog: null,
+        scanCount: 0
+      };
+
+      const iconClass = st.status === 'checked'
+        ? 'fa-check'
+        : (st.status === 'due_soon' ? 'fa-clock' : (st.status === 'unassigned' ? 'fa-user-slash' : 'fa-qrcode'));
 
       const customIcon = L.divIcon({
         className: 'admin-map-checkpoint-marker',
         html: `
-          <div style="background-color: ${color}; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; border: 2.5px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.4); font-size: 13px; cursor: pointer;">
-            <i class="fa-solid ${isChecked ? 'fa-check' : 'fa-qrcode'}"></i>
+          <div style="background-color: ${st.color}; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; border: 2.5px solid white; box-shadow: 0 2px 10px rgba(0,0,0,0.45); font-size: 13px; cursor: pointer;">
+            <i class="fa-solid ${iconClass}"></i>
           </div>
         `,
-        iconSize: [30, 30],
-        iconAnchor: [15, 15]
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
       });
 
-      const marker = L.marker([cp.lat, cp.lng], { icon: customIcon });
+      const marker = L.marker([parseFloat(cp.lat), parseFloat(cp.lng)], { icon: customIcon });
       const gDir = `https://www.google.com/maps/dir/?api=1&destination=${cp.lat},${cp.lng}`;
 
+      const scanInfoHtml = st.latestLog
+        ? `
+          <div style="margin: 6px 0; padding: 6px 8px; background: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 11px;">
+            <div><strong>Bảo vệ:</strong> ${st.latestLog.guardName}</div>
+            <div><strong>Giờ quét:</strong> ${getLogTimestampDate(st.latestLog).toLocaleTimeString('vi-VN')} (${st.scanCount} lượt ngày ${displayDateVN})</div>
+            <div><strong>Khoảng cách GPS:</strong> ${st.latestLog.distanceMeters !== null && st.latestLog.distanceMeters !== undefined ? st.latestLog.distanceMeters + 'm' : 'Hợp lệ'}</div>
+            <div><strong>Ca trực:</strong> ${st.latestLog.shiftName || 'Ca Trực 24H'}</div>
+          </div>
+        `
+        : `
+          <div style="margin: 6px 0; font-size: 11px; color: #64748b;">
+            Ngày xem: <strong>${displayDateVN}</strong>
+            ${st.isOverdue ? `<br><span style="color: #dc2626; font-weight: bold;">⚠️ Quá hạn ~${st.overdueMinutes} phút chưa quét!</span>` : ''}
+            ${st.status === 'due_soon' ? `<br><span style="color: #d97706; font-weight: bold;">⏱ Còn khoảng ${st.minutesRemaining} phút đến hạn kiểm tra</span>` : ''}
+          </div>
+        `;
+
       marker.bindPopup(`
-        <div style="font-family: inherit; font-size: 12px; line-height: 1.4;">
+        <div style="font-family: inherit; font-size: 12px; line-height: 1.4; min-width: 210px;">
           <strong style="color: #1e40af; font-size: 13px;">${cp.name}</strong><br>
-          <span style="color: #64748b;">${cp.campusName || ''} - ${cp.floor || ''}</span><br>
+          <span style="color: #64748b;">${cp.campusName || ''} • ${cp.zoneName || ''} (${cp.floor || ''})</span><br>
           <div style="margin: 6px 0;">
-            <span style="padding: 2px 6px; border-radius: 4px; background: ${isChecked ? '#d1fae5; color: #065f46;' : '#fef3c7; color: #92400e;'} font-weight: bold; font-size: 11px;">
-              ${isChecked ? '✓ Đã kiểm tra' : '⏱ Chưa kiểm tra'}
+            <span style="padding: 2px 7px; border-radius: 5px; background: ${st.badgeBg}; color: ${st.badgeText}; font-weight: bold; font-size: 11px;">
+              ${st.label}
             </span>
           </div>
+          ${scanInfoHtml}
           <div style="margin-top: 6px; display: flex; gap: 6px;">
             <a href="${gDir}" target="_blank" style="padding: 4px 8px; border-radius: 6px; background: #2563eb; color: white; text-decoration: none; font-size: 11px; font-weight: bold;">
-              Chỉ đường Google Maps &rarr;
+              Chỉ đường Maps &rarr;
             </a>
             <button onclick="window.adminModule.openEditCheckpointModal('${cp.id}')" style="padding: 4px 8px; border-radius: 6px; background: #f1f5f9; color: #0f172a; border: 1px solid #cbd5e1; font-size: 11px; font-weight: bold; cursor: pointer;">
               Sửa vị trí
@@ -2296,53 +2588,196 @@ class AdminDesktopModule {
   }
 
   /**
-   * 8. Patrol Logs with CSV Export
+   * 8. Patrol Logs with Date/Shift/Guard Filters, GPS Coordinates & Excel (.xlsx) Export
    */
+  async setPatrolLogPreset(mode) {
+    this.logFilterMode = mode;
+    const todayKey = getTodayDateKey();
+    if (mode === 'today') {
+      this.logFilterFrom = todayKey;
+      this.logFilterTo = todayKey;
+      this.logFilterLogsCache = null;
+    } else if (mode === 'yesterday') {
+      const yKey = getYesterdayDateKey();
+      this.logFilterFrom = yKey;
+      this.logFilterTo = yKey;
+      this.logFilterLogsCache = await fetchPatrolLogsByDateRange(yKey, yKey);
+    } else if (mode === '7days') {
+      const d = new Date();
+      d.setDate(d.getDate() - 6);
+      this.logFilterFrom = formatLocalDateKey(d);
+      this.logFilterTo = todayKey;
+      this.logFilterLogsCache = await fetchPatrolLogsByDateRange(this.logFilterFrom, this.logFilterTo);
+    } else if (mode === 'month') {
+      const monthPrefix = todayKey.slice(0, 7);
+      this.logFilterFrom = `${monthPrefix}-01`;
+      this.logFilterTo = todayKey;
+      this.logFilterLogsCache = await fetchPatrolLogsByDateRange(this.logFilterFrom, this.logFilterTo);
+    } else {
+      // 'all'
+      this.logFilterFrom = '';
+      this.logFilterTo = '';
+      this.logFilterLogsCache = null;
+    }
+    this.renderPatrolLogs(document.getElementById('admin-content-pane'));
+  }
+
+  async applyPatrolLogFilters() {
+    const fromVal = document.getElementById('log-filter-from')?.value || '';
+    const toVal = document.getElementById('log-filter-to')?.value || '';
+    const shiftVal = document.getElementById('log-filter-shift')?.value || 'all';
+    const guardVal = document.getElementById('log-filter-guard')?.value || 'all';
+
+    this.logFilterFrom = fromVal;
+    this.logFilterTo = toVal;
+    this.logFilterShift = shiftVal;
+    this.logFilterGuard = guardVal;
+    this.logFilterMode = 'custom';
+
+    if (fromVal && toVal) {
+      this.logFilterLogsCache = await fetchPatrolLogsByDateRange(fromVal, toVal);
+    } else if (fromVal) {
+      this.logFilterLogsCache = await fetchPatrolLogsByDateRange(fromVal, getTodayDateKey());
+    } else {
+      this.logFilterLogsCache = null;
+    }
+
+    this.renderPatrolLogs(document.getElementById('admin-content-pane'));
+  }
+
+  getFilteredPatrolLogs() {
+    const rawLogs = this.logFilterLogsCache !== null ? this.logFilterLogsCache : storage.getPatrolLogs();
+    return this.filterLogsByCriteria(rawLogs, {
+      fromDate: this.logFilterFrom || null,
+      toDate: this.logFilterTo || null,
+      shiftFilter: this.logFilterShift,
+      guardFilter: this.logFilterGuard
+    });
+  }
+
   renderPatrolLogs(container) {
-    const logs = storage.getPatrolLogs();
+    if (!container) return;
+    const users = storage.getUsers();
+    const guards = users.filter(u => u.role === 'guard');
+    const shifts = storage.getShifts();
+    const shiftList = shifts.length > 0 ? shifts : DEFAULT_SHIFTS;
+
+    const logs = this.getFilteredPatrolLogs();
+    const validCount = logs.filter(l => isPatrolLogValid(l)).length;
+    const warningCount = logs.length - validCount;
+
     container.innerHTML = `
       <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
-        <div class="flex items-center justify-between">
+        <div class="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100">Nhật Ký Tuần Tra Toàn Trường (Firestore Audit)</h4>
-            <p class="text-xs text-slate-500">Ghi nhận các lần quét mã QR, sai số GPS và kiểm định Cloud</p>
+            <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100 flex items-center gap-2">
+              <i class="fa-solid fa-clipboard-check text-blue-600"></i> Nhật Ký Tuần Tra Toàn Trường (Firestore Audit)
+            </h4>
+            <p class="text-xs text-slate-500">Mỗi lượt quét QR được lưu thành bản ghi riêng với thời gian máy chủ Firebase, tọa độ GPS & khoảng cách thực tế</p>
           </div>
-          <button onclick="window.adminModule.exportLogsCsv()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition">
-            <i class="fa-solid fa-file-excel mr-1.5"></i> Xuất file CSV / Excel
-          </button>
+          <div class="flex items-center gap-2">
+            <button onclick="window.adminModule.exportLogsExcel()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition flex items-center gap-1.5">
+              <i class="fa-solid fa-file-excel"></i> Xuất báo cáo Excel (.xlsx)
+            </button>
+          </div>
+        </div>
+
+        <!-- Filter Toolbar -->
+        <div class="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 space-y-2.5 text-xs">
+          <div class="flex items-center flex-wrap gap-1.5">
+            <span class="text-[11px] font-bold text-slate-500 mr-1">Nhanh:</span>
+            ${[
+              { k: 'today', label: 'Hôm nay' },
+              { k: 'yesterday', label: 'Hôm qua' },
+              { k: '7days', label: '7 ngày qua' },
+              { k: 'month', label: 'Tháng này' },
+              { k: 'all', label: 'Tất cả gần nhất' }
+            ].map(p => `
+              <button onclick="window.adminModule.setPatrolLogPreset('${p.k}')" class="px-2.5 py-1 rounded-lg font-bold transition ${this.logFilterMode === p.k ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'}">
+                ${p.label}
+              </button>
+            `).join('')}
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 uppercase mb-0.5">Từ ngày</label>
+              <input type="date" id="log-filter-from" value="${this.logFilterFrom}" onchange="window.adminModule.applyPatrolLogFilters()" class="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 font-bold">
+            </div>
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 uppercase mb-0.5">Đến ngày</label>
+              <input type="date" id="log-filter-to" value="${this.logFilterTo}" onchange="window.adminModule.applyPatrolLogFilters()" class="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 font-bold">
+            </div>
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 uppercase mb-0.5">Ca trực</label>
+              <select id="log-filter-shift" onchange="window.adminModule.applyPatrolLogFilters()" class="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 font-bold">
+                <option value="all" ${this.logFilterShift === 'all' ? 'selected' : ''}>Tất cả ca trực</option>
+                ${shiftList.map(s => `<option value="${s.name}" ${this.logFilterShift === s.name ? 'selected' : ''}>${s.name}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 uppercase mb-0.5">Nhân viên bảo vệ</label>
+              <select id="log-filter-guard" onchange="window.adminModule.applyPatrolLogFilters()" class="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 font-bold">
+                <option value="all" ${this.logFilterGuard === 'all' ? 'selected' : ''}>Tất cả nhân viên</option>
+                ${guards.map(g => `<option value="${g.id}" ${this.logFilterGuard === g.id ? 'selected' : ''}>${g.name} (${g.code})</option>`).join('')}
+              </select>
+            </div>
+            <div class="flex items-end">
+              <div class="w-full p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-center">
+                <span class="font-extrabold text-blue-600">${logs.length}</span> lượt
+                (<span class="text-emerald-600 font-bold">${validCount} OK</span> / <span class="text-amber-600 font-bold">${warningCount} CB</span>)
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="overflow-x-auto">
           <table class="w-full text-left text-xs text-slate-600 dark:text-slate-300">
             <thead class="bg-slate-50 dark:bg-slate-900 text-slate-500 uppercase text-[11px]">
               <tr>
-                <th class="p-3">Thời gian</th>
+                <th class="p-3">Ngày & Giờ quét</th>
                 <th class="p-3">Nhân viên</th>
                 <th class="p-3">Ca trực</th>
-                <th class="p-3">Điểm chốt</th>
-                <th class="p-3">Khoảng cách GPS</th>
-                <th class="p-3">Ghi chú</th>
-                <th class="p-3">Kiểm tra</th>
+                <th class="p-3">Tên chốt QR</th>
+                <th class="p-3">Tọa độ GPS</th>
+                <th class="p-3">Khoảng cách</th>
+                <th class="p-3">Trạng thái</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
               ${logs.length === 0 ? `
-                <tr><td colspan="7" class="p-8 text-center text-slate-400">Chưa có nhật ký tuần tra nào trong Firestore.</td></tr>
+                <tr><td colspan="7" class="p-8 text-center text-slate-400">Không tìm thấy bản ghi tuần tra nào phù hợp với bộ lọc đang chọn.</td></tr>
               ` : logs.map(l => {
-                const isValid = l.gpsStatus === 'valid' || l.verificationStatus === 'verified_cloud';
+                const isValid = isPatrolLogValid(l);
+                const ts = getLogTimestampDate(l);
+                const hasGps = l.guardCoordinates && l.guardCoordinates.lat && l.guardCoordinates.lng;
+                const gmapLink = hasGps ? `https://www.google.com/maps?q=${l.guardCoordinates.lat},${l.guardCoordinates.lng}` : '#';
                 return `
                   <tr class="hover:bg-slate-50/50">
-                    <td class="p-3 font-mono font-bold">${new Date(l.scannedAt).toLocaleTimeString('vi-VN')} <span class="text-slate-400 font-normal">(${new Date(l.scannedAt).toLocaleDateString('vi-VN')})</span></td>
-                    <td class="p-3 font-semibold text-slate-800 dark:text-slate-100">${l.guardName}</td>
-                    <td class="p-3">${l.shiftName || 'Ca hiện tại'}</td>
-                    <td class="p-3 font-bold text-blue-600">${l.checkpointName}</td>
-                    <td class="p-3 font-bold ${isValid ? 'text-emerald-600' : 'text-amber-600'}">
-                      ${l.distanceMeters !== null ? l.distanceMeters + 'm' : '—'}
+                    <td class="p-3 font-mono font-bold whitespace-nowrap">
+                      <div>${ts.toLocaleTimeString('vi-VN')}</div>
+                      <div class="text-[10px] text-slate-400 font-normal">${ts.toLocaleDateString('vi-VN')}</div>
                     </td>
-                    <td class="p-3 text-slate-500">${l.notes}</td>
+                    <td class="p-3 font-semibold text-slate-800 dark:text-slate-100">${l.guardName}</td>
+                    <td class="p-3 text-[11px]">${l.shiftName || 'Ca Trực 24H'}</td>
+                    <td class="p-3">
+                      <div class="font-bold text-blue-600">${l.checkpointName}</div>
+                      <div class="text-[10px] font-mono text-slate-400">${l.checkpointCode || ''} • ${l.campusName || ''}</div>
+                    </td>
+                    <td class="p-3 font-mono text-[11px]">
+                      ${hasGps ? `
+                        <a href="${gmapLink}" target="_blank" class="text-blue-600 hover:underline font-semibold inline-flex items-center gap-1">
+                          <i class="fa-solid fa-location-dot text-rose-500"></i>
+                          ${Number(l.guardCoordinates.lat).toFixed(5)}, ${Number(l.guardCoordinates.lng).toFixed(5)}
+                        </a>
+                      ` : '<span class="text-slate-400">—</span>'}
+                    </td>
+                    <td class="p-3 font-bold ${isValid ? 'text-emerald-600' : 'text-amber-600'} whitespace-nowrap">
+                      ${l.distanceMeters !== null && l.distanceMeters !== undefined ? l.distanceMeters + 'm' : '—'}
+                    </td>
                     <td class="p-3">
                       <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isValid ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">
-                        ${isValid ? 'Hợp lệ' : 'Cảnh báo'}
+                        ${isValid ? '✓ Hợp lệ' : '⚠ Cảnh báo'}
                       </span>
                     </td>
                   </tr>
@@ -2355,20 +2790,64 @@ class AdminDesktopModule {
     `;
   }
 
-  exportLogsCsv() {
-    const logs = storage.getPatrolLogs();
-    let csv = "Thời Gian,Nhân Viên,Ca Trực,Điểm Chốt,Khoảng Cách (m),Trạng Thái\n";
-    logs.forEach(l => {
-      csv += `"${l.scannedAt}","${l.guardName}","${l.shiftName || ''}","${l.checkpointName}","${l.distanceMeters || ''}","${l.verificationStatus}"\n`;
+  exportLogsExcel() {
+    const logs = this.getFilteredPatrolLogs();
+    if (logs.length === 0) {
+      alert('Không có dữ liệu nhật ký nào trong bộ lọc hiện tại để xuất Excel!');
+      return;
+    }
+
+    const rows = logs.map((l, idx) => {
+      const ts = getLogTimestampDate(l);
+      const isValid = isPatrolLogValid(l);
+      return {
+        'STT': idx + 1,
+        'Ngày quét': ts.toLocaleDateString('vi-VN'),
+        'Giờ quét': ts.toLocaleTimeString('vi-VN'),
+        'Nhân viên bảo vệ': l.guardName || '',
+        'Ca trực': l.shiftName || 'Ca Trực 24H',
+        'Tên chốt QR': l.checkpointName || '',
+        'Mã QR': l.checkpointCode || '',
+        'Cơ sở': l.campusName || '',
+        'Tọa độ GPS (Lat, Lng)': l.guardCoordinates ? `${l.guardCoordinates.lat}, ${l.guardCoordinates.lng}` : '',
+        'Khoảng cách (m)': l.distanceMeters !== null && l.distanceMeters !== undefined ? l.distanceMeters : '',
+        'Trạng thái': isValid ? 'Hợp lệ' : 'Cảnh báo GPS',
+        'Ghi chú': l.notes || ''
+      };
     });
 
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute("download", `nhat_ky_tuan_tra_nsg_${new Date().toISOString().split('T')[0]}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    const dateTag = this.logFilterFrom && this.logFilterTo
+      ? `${this.logFilterFrom}_den_${this.logFilterTo}`
+      : getTodayDateKey();
+
+    if (window.XLSX) {
+      const ws = window.XLSX.utils.json_to_sheet(rows);
+      ws['!cols'] = [
+        { wch: 5 }, { wch: 12 }, { wch: 10 }, { wch: 24 }, { wch: 28 },
+        { wch: 24 }, { wch: 14 }, { wch: 24 }, { wch: 24 }, { wch: 15 }, { wch: 14 }, { wch: 35 }
+      ];
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, ws, 'NhatKyTuanTra');
+      window.XLSX.writeFile(wb, `NSG_NhatKyTuanTra_${dateTag}.xlsx`);
+    } else {
+      // Fallback UTF-8 BOM CSV for Excel compatibility if offline
+      const headers = Object.keys(rows[0]);
+      let csv = '\uFEFF' + headers.join(',') + '\n';
+      rows.forEach(r => {
+        csv += headers.map(h => `"${String(r[h]).replace(/"/g, '""')}"`).join(',') + '\n';
+      });
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute('download', `NSG_NhatKyTuanTra_${dateTag}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  }
+
+  exportLogsCsv() {
+    this.exportLogsExcel();
   }
 
   /**
@@ -2421,18 +2900,398 @@ class AdminDesktopModule {
   }
 
   /**
-   * 10. Reports
+   * 10. Monthly Patrol Reports & Statistics
    */
+  async setReportMonth(monthStr) {
+    if (!monthStr) return;
+    this.reportMonth = monthStr;
+    await this.loadMonthlyReportData();
+    this.renderReports(document.getElementById('admin-content-pane'));
+  }
+
+  setReportCampus(campusId) {
+    this.reportCampus = campusId || 'all';
+    this.renderReports(document.getElementById('admin-content-pane'));
+  }
+
+  async loadMonthlyReportData() {
+    const [year, month] = this.reportMonth.split('-').map(Number);
+    const lastDay = new Date(year, month, 0).getDate();
+    const startKey = `${this.reportMonth}-01`;
+    const endKey = `${this.reportMonth}-${String(lastDay).padStart(2, '0')}`;
+    this.reportLogsCache = await fetchPatrolLogsByDateRange(startKey, endKey);
+  }
+
+  async openDateOnDashboardMap(dateKey) {
+    this.dashboardDate = dateKey;
+    this.dashboardShift = 'all';
+    this.dashboardGuard = 'all';
+    const todayKey = getTodayDateKey();
+    if (dateKey !== todayKey) {
+      this.dashboardLogsCache = await fetchPatrolLogsByDateRange(dateKey, dateKey);
+    } else {
+      this.dashboardLogsCache = null;
+    }
+    this.switchModule('dashboard');
+  }
+
+  computeMonthlyReportMetrics() {
+    const [year, month] = this.reportMonth.split('-').map(Number);
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const todayKey = getTodayDateKey();
+
+    const allCheckpoints = storage.getCheckpoints();
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+    const selectedCampusObj = this.reportCampus !== 'all' ? campusList.find(c => c.id === this.reportCampus) : null;
+
+    const checkpoints = allCheckpoints.filter(cp => {
+      if (this.reportCampus === 'all') return true;
+      if (cp.campusId && cp.campusId === this.reportCampus) return true;
+      if (selectedCampusObj && cp.campusName && cp.campusName.toLowerCase().includes((selectedCampusObj.name || '').toLowerCase().split('-')[0].trim())) return true;
+      return false;
+    });
+
+    const cpIdSet = new Set(checkpoints.map(c => c.id));
+    const users = storage.getUsers();
+    const guards = users.filter(u => u.role === 'guard' && (this.reportCampus === 'all' || u.campusId === this.reportCampus));
+
+    const sourceLogs = this.reportLogsCache !== null ? this.reportLogsCache : storage.getPatrolLogs();
+    const monthLogs = sourceLogs.filter(l => {
+      const dk = getLogDateKey(l);
+      if (!dk.startsWith(this.reportMonth)) return false;
+      if (this.reportCampus !== 'all' && !cpIdSet.has(l.checkpointId)) return false;
+      return true;
+    });
+
+    // Determine elapsed days in the selected month (don't count future days as missed)
+    const elapsedDateKeys = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dk = `${this.reportMonth}-${String(day).padStart(2, '0')}`;
+      if (dk <= todayKey) {
+        elapsedDateKeys.push(dk);
+      }
+    }
+
+    // Count shifts operated (distinct date + shiftName, or at least 1 shift/day elapsed)
+    const activeShiftSet = new Set();
+    monthLogs.forEach(l => {
+      activeShiftSet.add(`${getLogDateKey(l)}__${l.shiftName || 'Ca Trực 24H'}`);
+    });
+    const totalShifts = Math.max(activeShiftSet.size, elapsedDateKeys.length);
+
+    const totalScans = monthLogs.length;
+    const completedScans = monthLogs.filter(l => isPatrolLogValid(l)).length;
+    const flaggedScans = totalScans - completedScans;
+
+    // Evaluate day-by-day completeness
+    const incompleteDays = [];
+    let totalRequiredCheckpointDays = elapsedDateKeys.length * checkpoints.length;
+    let totalCompletedCheckpointDays = 0;
+
+    elapsedDateKeys.forEach(dk => {
+      const dayValidLogs = monthLogs.filter(l => getLogDateKey(l) === dk && isPatrolLogValid(l));
+      const scannedCpIds = new Set(dayValidLogs.map(l => l.checkpointId));
+      const checkedCount = checkpoints.filter(cp => scannedCpIds.has(cp.id)).length;
+      totalCompletedCheckpointDays += checkedCount;
+
+      if (checkpoints.length > 0 && checkedCount < checkpoints.length) {
+        const missedCps = checkpoints.filter(cp => !scannedCpIds.has(cp.id));
+        const guardsOnDay = [...new Set(dayValidLogs.map(l => l.guardName).filter(Boolean))];
+        incompleteDays.push({
+          dateKey: dk,
+          displayDate: dk.split('-').reverse().join('/'),
+          checkedCount,
+          totalCheckpoints: checkpoints.length,
+          percent: Math.round((checkedCount / checkpoints.length) * 100),
+          missedNames: missedCps.map(c => c.name),
+          guardsOnDay
+        });
+      }
+    });
+
+    const uncompletedCount = Math.max(0, totalRequiredCheckpointDays - totalCompletedCheckpointDays) + flaggedScans;
+
+    // Per-guard completion statistics
+    const guardStats = guards.map(g => {
+      const gLogs = monthLogs.filter(l => l.guardId === g.id);
+      const gValidLogs = gLogs.filter(l => isPatrolLogValid(l));
+      const activeDays = new Set(gValidLogs.map(l => getLogDateKey(l)));
+      const uniqueCpsPerDaySum = Array.from(activeDays).reduce((sum, dk) => {
+        const cpsOnDay = new Set(gValidLogs.filter(l => getLogDateKey(l) === dk).map(l => l.checkpointId));
+        return sum + cpsOnDay.size;
+      }, 0);
+
+      // Target: checkpoints across elapsed days (or active days if guard has specific days)
+      const targetDays = Math.max(activeDays.size, elapsedDateKeys.length);
+      const targetCheckpoints = targetDays * checkpoints.length;
+      const rate = targetCheckpoints > 0 ? Math.min(100, Math.round((uniqueCpsPerDaySum / targetCheckpoints) * 100)) : 0;
+
+      return {
+        guard: g,
+        activeDaysCount: activeDays.size,
+        totalScans: gLogs.length,
+        validScans: gValidLogs.length,
+        flaggedScans: gLogs.length - gValidLogs.length,
+        completedCheckpointDays: uniqueCpsPerDaySum,
+        targetCheckpoints,
+        rate
+      };
+    });
+
+    // Sort guards by completion rate descending
+    guardStats.sort((a, b) => b.rate - a.rate || b.validScans - a.validScans);
+
+    return {
+      monthStr: this.reportMonth,
+      elapsedDaysCount: elapsedDateKeys.length,
+      daysInMonth,
+      checkpointsCount: checkpoints.length,
+      totalShifts,
+      totalScans,
+      completedScans,
+      uncompletedCount,
+      flaggedScans,
+      overallCompletionRate: totalRequiredCheckpointDays > 0 ? Math.round((totalCompletedCheckpointDays / totalRequiredCheckpointDays) * 100) : 0,
+      guardStats,
+      incompleteDays: incompleteDays.reverse(), // Most recent incomplete day first
+      monthLogs
+    };
+  }
+
   renderReports(container) {
+    if (!container) return;
+
+    // Ensure full month logs are loaded from Firestore once per month selection
+    if (this.reportLogsCache === null) {
+      this.loadMonthlyReportData().then(() => {
+        if (this.currentModule === 'reports') {
+          this.renderReports(document.getElementById('admin-content-pane'));
+        }
+      });
+    }
+
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+    const m = this.computeMonthlyReportMetrics();
+    const [yr, mo] = m.monthStr.split('-');
+
     container.innerHTML = `
-      <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
-        <div class="flex items-center justify-between">
-          <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100">Báo Cáo An Ninh & Hiệu Suất</h4>
-          <button onclick="window.print()" class="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl">In Báo Cáo</button>
+      <div class="space-y-5">
+        <!-- Header & Filters -->
+        <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                <i class="fa-solid fa-file-invoice text-blue-600"></i> Báo Cáo Tuần Tra Tháng ${mo}/${yr}
+              </h4>
+              <p class="text-xs text-slate-500">Tổng hợp hiệu suất ca trực, tỷ lệ hoàn thành theo từng bảo vệ & các ngày chưa thực hiện đủ nhiệm vụ</p>
+            </div>
+            <div class="flex items-center flex-wrap gap-2">
+              <input type="month" id="report-month-picker" value="${this.reportMonth}" onchange="window.adminModule.setReportMonth(this.value)" class="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs font-bold">
+              <select id="report-campus-filter" onchange="window.adminModule.setReportCampus(this.value)" class="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs font-bold">
+                <option value="all" ${this.reportCampus === 'all' ? 'selected' : ''}>Tất cả cơ sở</option>
+                ${campusList.map(c => `<option value="${c.id}" ${this.reportCampus === c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
+              </select>
+              <button onclick="window.adminModule.exportMonthlyReportExcel()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5">
+                <i class="fa-solid fa-file-excel"></i> Xuất Excel Tháng
+              </button>
+              <button onclick="window.print()" class="px-4 py-2 bg-slate-900 hover:bg-black text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5">
+                <i class="fa-solid fa-print"></i> In Báo Cáo
+              </button>
+            </div>
+          </div>
+
+          <!-- 4 Monthly KPI Cards -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-1">
+            <div class="p-4 rounded-2xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900">
+              <div class="text-[11px] font-bold text-blue-600 uppercase">Tổng số ca trực</div>
+              <div class="text-2xl font-black text-blue-700 dark:text-blue-300 font-mono mt-1">${m.totalShifts}</div>
+              <div class="text-[11px] text-slate-500 mt-0.5">${m.elapsedDaysCount}/${m.daysInMonth} ngày đã tính trong tháng</div>
+            </div>
+
+            <div class="p-4 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900">
+              <div class="text-[11px] font-bold text-indigo-600 uppercase">Tổng lượt tuần tra</div>
+              <div class="text-2xl font-black text-indigo-700 dark:text-indigo-300 font-mono mt-1">${m.totalScans}</div>
+              <div class="text-[11px] text-slate-500 mt-0.5">Tổng số lần quét mã QR chốt</div>
+            </div>
+
+            <div class="p-4 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900">
+              <div class="text-[11px] font-bold text-emerald-600 uppercase">Số lượt hoàn thành</div>
+              <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300 font-mono mt-1">${m.completedScans}</div>
+              <div class="text-[11px] text-emerald-600 font-semibold mt-0.5">Tỷ lệ phủ chốt tháng: ${m.overallCompletionRate}%</div>
+            </div>
+
+            <div class="p-4 rounded-2xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900">
+              <div class="text-[11px] font-bold text-rose-600 uppercase">Số lượt không hoàn thành</div>
+              <div class="text-2xl font-black text-rose-700 dark:text-rose-300 font-mono mt-1">${m.uncompletedCount}</div>
+              <div class="text-[11px] text-rose-600 mt-0.5">${m.incompleteDays.length} ngày chưa đủ chốt • ${m.flaggedScans} cảnh báo</div>
+            </div>
+          </div>
         </div>
-        <p class="text-xs text-slate-500">Tự động tổng hợp dữ liệu từ nhật ký tuần tra thực tế trên Firestore.</p>
+
+        <!-- Table 1: Completion Rate per Guard -->
+        <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+          <div>
+            <h5 class="font-bold text-base text-slate-800 dark:text-slate-100 flex items-center gap-2">
+              <i class="fa-solid fa-user-check text-emerald-600"></i> Tỷ Lệ Hoàn Thành Theo Từng Bảo Vệ (Tháng ${mo}/${yr})
+            </h5>
+            <p class="text-xs text-slate-500">Thống kê lượt quét hợp lệ so với tổng mục tiêu điểm chốt trong tháng</p>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs text-slate-600 dark:text-slate-300">
+              <thead class="bg-slate-50 dark:bg-slate-900 text-slate-500 uppercase text-[11px]">
+                <tr>
+                  <th class="p-3">Nhân viên bảo vệ</th>
+                  <th class="p-3">Cơ sở / Ca cố định</th>
+                  <th class="p-3 text-center">Số ngày có quét</th>
+                  <th class="p-3 text-center">Lượt hợp lệ</th>
+                  <th class="p-3 text-center">Lượt cảnh báo</th>
+                  <th class="p-3">Tỷ lệ hoàn thành</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
+                ${m.guardStats.length === 0 ? `
+                  <tr><td colspan="6" class="p-6 text-center text-slate-400">Chưa có nhân viên bảo vệ nào trong hệ thống.</td></tr>
+                ` : m.guardStats.map(gs => {
+                  const barColor = gs.rate >= 80 ? 'bg-emerald-500' : (gs.rate >= 50 ? 'bg-amber-500' : 'bg-rose-500');
+                  const textColor = gs.rate >= 80 ? 'text-emerald-600' : (gs.rate >= 50 ? 'text-amber-600' : 'text-rose-600');
+                  return `
+                    <tr class="hover:bg-slate-50/50">
+                      <td class="p-3 font-bold text-slate-800 dark:text-slate-100">
+                        ${gs.guard.name} <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500">${gs.guard.code}</span>
+                      </td>
+                      <td class="p-3">
+                        <div class="font-semibold">${gs.guard.campusName || 'Trụ sở chính'}</div>
+                        <div class="text-[10px] text-blue-600">${gs.guard.fixedShiftName || 'Ca Trực 24H'}</div>
+                      </td>
+                      <td class="p-3 text-center font-mono font-bold">${gs.activeDaysCount}/${m.elapsedDaysCount}</td>
+                      <td class="p-3 text-center font-mono font-bold text-emerald-600">${gs.validScans}</td>
+                      <td class="p-3 text-center font-mono font-bold ${gs.flaggedScans > 0 ? 'text-amber-600' : 'text-slate-400'}">${gs.flaggedScans}</td>
+                      <td class="p-3 min-w-[170px]">
+                        <div class="flex items-center justify-between text-[11px] font-bold mb-1">
+                          <span class="${textColor}">${gs.rate}%</span>
+                          <span class="text-slate-400 font-normal">${gs.completedCheckpointDays}/${gs.targetCheckpoints} chốt-ngày</span>
+                        </div>
+                        <div class="w-full h-2 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                          <div class="h-full ${barColor} rounded-full" style="width: ${gs.rate}%"></div>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Table 2: Days Not Completing All Patrol Tasks -->
+        <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h5 class="font-bold text-base text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                <i class="fa-solid fa-calendar-xmark text-rose-600"></i> Những Ngày Không Thực Hiện Đủ Nhiệm Vụ (${m.incompleteDays.length} ngày)
+              </h5>
+              <p class="text-xs text-slate-500">Danh sách các ngày trong tháng ${mo}/${yr} còn điểm chốt chưa được quét đủ</p>
+            </div>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs text-slate-600 dark:text-slate-300">
+              <thead class="bg-slate-50 dark:bg-slate-900 text-slate-500 uppercase text-[11px]">
+                <tr>
+                  <th class="p-3">Ngày</th>
+                  <th class="p-3 text-center">Đã quét / Tổng chốt</th>
+                  <th class="p-3 text-center">Tỷ lệ</th>
+                  <th class="p-3">Các chốt chưa quét</th>
+                  <th class="p-3 text-right">Xem bản đồ</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
+                ${m.incompleteDays.length === 0 ? `
+                  <tr><td colspan="5" class="p-6 text-center text-emerald-600 font-bold">🎉 Xuất sắc! Tất cả các ngày trong tháng đều hoàn thành đủ 100% chốt tuần tra.</td></tr>
+                ` : m.incompleteDays.map(d => `
+                  <tr class="hover:bg-slate-50/50">
+                    <td class="p-3 font-mono font-bold text-slate-800 dark:text-slate-100 whitespace-nowrap">${d.displayDate}</td>
+                    <td class="p-3 text-center font-mono font-bold">
+                      <span class="text-emerald-600">${d.checkedCount}</span> / ${d.totalCheckpoints}
+                    </td>
+                    <td class="p-3 text-center">
+                      <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${d.percent >= 50 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-700'}">
+                        ${d.percent}%
+                      </span>
+                    </td>
+                    <td class="p-3 text-rose-600 dark:text-rose-400">
+                      ${d.missedNames.slice(0, 4).join(', ')}${d.missedNames.length > 4 ? ` (+${d.missedNames.length - 4} chốt khác)` : ''}
+                    </td>
+                    <td class="p-3 text-right whitespace-nowrap">
+                      <button onclick="window.adminModule.openDateOnDashboardMap('${d.dateKey}')" class="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[11px] transition">
+                        <i class="fa-solid fa-map-location-dot mr-1"></i> Xem ngày này
+                      </button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     `;
+  }
+
+  exportMonthlyReportExcel() {
+    const m = this.computeMonthlyReportMetrics();
+
+    const guardRows = m.guardStats.map((gs, idx) => ({
+      'STT': idx + 1,
+      'Họ tên bảo vệ': gs.guard.name,
+      'Mã NV': gs.guard.code,
+      'Cơ sở': gs.guard.campusName || '',
+      'Ca cố định': gs.guard.fixedShiftName || 'Ca Trực 24H',
+      'Số ngày hoạt động': `${gs.activeDaysCount}/${m.elapsedDaysCount}`,
+      'Tổng lượt quét': gs.totalScans,
+      'Lượt hợp lệ': gs.validScans,
+      'Lượt cảnh báo': gs.flaggedScans,
+      'Tỷ lệ hoàn thành (%)': `${gs.rate}%`
+    }));
+
+    const incompleteRows = m.incompleteDays.map((d, idx) => ({
+      'STT': idx + 1,
+      'Ngày': d.displayDate,
+      'Đã quét': d.checkedCount,
+      'Tổng chốt': d.totalCheckpoints,
+      'Tỷ lệ (%)': `${d.percent}%`,
+      'Danh sách chốt bị bỏ sót': d.missedNames.join(', ')
+    }));
+
+    const detailRows = m.monthLogs.map((l, idx) => {
+      const ts = getLogTimestampDate(l);
+      return {
+        'STT': idx + 1,
+        'Ngày': ts.toLocaleDateString('vi-VN'),
+        'Giờ': ts.toLocaleTimeString('vi-VN'),
+        'Nhân viên': l.guardName || '',
+        'Ca trực': l.shiftName || '',
+        'Tên chốt QR': l.checkpointName || '',
+        'Tọa độ GPS': l.guardCoordinates ? `${l.guardCoordinates.lat}, ${l.guardCoordinates.lng}` : '',
+        'Khoảng cách (m)': l.distanceMeters !== null && l.distanceMeters !== undefined ? l.distanceMeters : '',
+        'Trạng thái': isPatrolLogValid(l) ? 'Hợp lệ' : 'Cảnh báo GPS'
+      };
+    });
+
+    if (window.XLSX) {
+      const wb = window.XLSX.utils.book_new();
+      const ws1 = window.XLSX.utils.json_to_sheet(guardRows.length ? guardRows : [{ 'Thông báo': 'Chưa có nhân viên bảo vệ' }]);
+      const ws2 = window.XLSX.utils.json_to_sheet(incompleteRows.length ? incompleteRows : [{ 'Thông báo': 'Tất cả các ngày đều hoàn thành đủ nhiệm vụ' }]);
+      const ws3 = window.XLSX.utils.json_to_sheet(detailRows.length ? detailRows : [{ 'Thông báo': 'Chưa có lượt quét nào trong tháng' }]);
+
+      window.XLSX.utils.book_append_sheet(wb, ws1, 'TyLeBaoVe');
+      window.XLSX.utils.book_append_sheet(wb, ws2, 'NgayChuaHoanThanh');
+      window.XLSX.utils.book_append_sheet(wb, ws3, 'ChiTietThang');
+      window.XLSX.writeFile(wb, `NSG_BaoCaoTuanTra_Thang_${m.monthStr}.xlsx`);
+    } else {
+      alert('Không tải được thư viện xuất Excel (.xlsx) do đang offline. Vui lòng kết nối mạng và thử lại.');
+    }
   }
 
   /**
@@ -2449,6 +3308,11 @@ class AdminDesktopModule {
             <input type="number" id="setting-gps-radius" value="${settings.maxGpsRadiusMeters || 20}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
           </div>
           <div>
+            <label class="block font-bold mb-1">Thời gian quy định tuần tra chốt (Phút) — Dùng để cảnh báo quá hạn / gần đến hạn</label>
+            <input type="number" id="setting-patrol-interval" value="${settings.patrolIntervalMinutes || 180}" min="15" max="1440" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
+            <span class="text-[11px] text-slate-400">VD: 180 phút (3 tiếng). Từ 70% thời gian trở đi chốt chuyển màu cam (gần đến hạn), quá 100% sẽ phát cảnh báo đỏ trên Dashboard.</span>
+          </div>
+          <div>
             <label class="block font-bold mb-1">Thời gian giãn cách quét tối thiểu (Giây)</label>
             <input type="number" id="setting-cooldown" value="${settings.scanCooldownSeconds || 5}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
           </div>
@@ -2462,14 +3326,39 @@ class AdminDesktopModule {
 
   saveSystemSettings() {
     const radius = parseInt(document.getElementById('setting-gps-radius').value, 10) || 20;
+    const interval = parseInt(document.getElementById('setting-patrol-interval')?.value, 10) || 180;
     const cooldown = parseInt(document.getElementById('setting-cooldown').value, 10) || 5;
-    storage.saveSettings({ ...storage.getSettings(), maxGpsRadiusMeters: radius, scanCooldownSeconds: cooldown });
+    storage.saveSettings({
+      ...storage.getSettings(),
+      maxGpsRadiusMeters: radius,
+      patrolIntervalMinutes: interval,
+      scanCooldownSeconds: cooldown
+    });
     alert('✅ Đã lưu cấu hình an ninh!');
   }
 }
 
 export const adminModule = new AdminDesktopModule();
 window.adminModule = adminModule;
+window.renderDashboardUI = (resetToToday = false) => {
+  if (resetToToday) {
+    adminModule.dashboardDate = getTodayDateKey();
+    adminModule.dashboardLogsCache = null;
+  }
+  if (adminModule.currentModule === 'dashboard') {
+    adminModule.renderDashboard(document.getElementById('admin-content-pane'));
+  }
+};
+window.renderPatrolLogsUI = () => {
+  if (adminModule.currentModule === 'patrol_logs') {
+    adminModule.renderPatrolLogs(document.getElementById('admin-content-pane'));
+  }
+};
+window.renderReportsUI = () => {
+  if (adminModule.currentModule === 'reports') {
+    adminModule.renderReports(document.getElementById('admin-content-pane'));
+  }
+};
 window.renderStaffUI = () => {
   if (adminModule.currentModule === 'staff') adminModule.renderStaff(document.getElementById('admin-content-pane'));
 };

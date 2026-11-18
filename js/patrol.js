@@ -3,6 +3,7 @@
  */
 
 import { storage } from "./storage.js";
+import { getTodayDateKey, getLogDateKey, isPatrolLogValid } from "./firebase-config.js";
 
 class PatrolModule {
   constructor() {
@@ -67,26 +68,13 @@ class PatrolModule {
   }
 
   getCheckpointStatus(checkpointId, logs) {
-    // Current 24h shift starts at 06:00 (today or yesterday if currently < 6 AM) and ends at 06:00 next day
-    const now = new Date();
-    const shiftStart = new Date(now);
-    if (now.getHours() < 6) {
-      shiftStart.setDate(shiftStart.getDate() - 1);
-    }
-    shiftStart.setHours(6, 0, 0, 0);
-
-    const shiftEnd = new Date(shiftStart);
-    shiftEnd.setDate(shiftEnd.getDate() + 1);
-    shiftEnd.setHours(6, 0, 0, 0);
+    // Strictly evaluate today's daily patrol status (YYYY-MM-DD); never carry over yesterday's scans
+    const todayKey = getTodayDateKey();
 
     const recentLog = logs.find(log => {
       if (log.checkpointId !== checkpointId) return false;
-      const logDate = new Date(log.scannedAt);
-      const isWithinShift = logDate >= shiftStart && logDate < shiftEnd;
-      // Only count scans strictly within the 20m perimeter
-      const isWithin20m = log.distanceMeters === null || log.distanceMeters <= 20;
-      const isValidStatus = log.verificationStatus !== 'flagged_gps_distance';
-      return isWithinShift && isWithin20m && isValidStatus;
+      if (getLogDateKey(log) !== todayKey) return false;
+      return isPatrolLogValid(log);
     });
 
     return recentLog ? { checked: true, log: recentLog } : { checked: false, log: null };

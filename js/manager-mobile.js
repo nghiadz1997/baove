@@ -5,11 +5,22 @@
  */
 
 import { storage } from "./storage.js";
-import { OFFICIAL_CAMPUSES, updateFirestoreUser } from "./firebase-config.js";
+import {
+  OFFICIAL_CAMPUSES,
+  updateFirestoreUser,
+  getTodayDateKey,
+  getYesterdayDateKey,
+  getLogDateKey,
+  getLogTimestampDate,
+  evaluateCheckpointDailyStatus,
+  fetchPatrolLogsByDateRange
+} from "./firebase-config.js";
 
 class ManagerMobileModule {
   constructor() {
     this.selectedCampus = 'all';
+    this.selectedDate = getTodayDateKey();
+    this.dayLogsCache = null;
     this.mapInstance = null;
     this.markersGroup = null;
     this.campusCircleLayer = null;
@@ -66,6 +77,50 @@ class ManagerMobileModule {
     if (myLocationBtn) {
       myLocationBtn.addEventListener('click', () => this.zoomToUserLocation());
     }
+
+    const datePicker = document.getElementById('mgr-map-date-picker');
+    const btnToday = document.getElementById('mgr-date-today');
+    const btnYesterday = document.getElementById('mgr-date-yesterday');
+    if (datePicker) {
+      datePicker.value = this.selectedDate;
+      datePicker.addEventListener('change', async (e) => {
+        if (e.target.value) {
+          await this.setSelectedDate(e.target.value);
+        }
+      });
+    }
+    if (btnToday) {
+      btnToday.addEventListener('click', () => this.setSelectedDate(getTodayDateKey()));
+    }
+    if (btnYesterday) {
+      btnYesterday.addEventListener('click', () => this.setSelectedDate(getYesterdayDateKey()));
+    }
+  }
+
+  async setSelectedDate(dateKey) {
+    this.selectedDate = dateKey;
+    const datePicker = document.getElementById('mgr-map-date-picker');
+    if (datePicker) datePicker.value = dateKey;
+    const btnToday = document.getElementById('mgr-date-today');
+    const btnYesterday = document.getElementById('mgr-date-yesterday');
+    const isToday = dateKey === getTodayDateKey();
+    const isYesterday = dateKey === getYesterdayDateKey();
+    if (btnToday) {
+      btnToday.className = isToday
+        ? 'px-2.5 py-1 rounded-lg bg-blue-600 text-white font-bold'
+        : 'px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold';
+    }
+    if (btnYesterday) {
+      btnYesterday.className = isYesterday
+        ? 'px-2.5 py-1 rounded-lg bg-blue-600 text-white font-bold'
+        : 'px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold';
+    }
+    if (!isToday) {
+      this.dayLogsCache = await fetchPatrolLogsByDateRange(dateKey, dateKey);
+    } else {
+      this.dayLogsCache = null;
+    }
+    this.render();
   }
 
   panMapToSelectedCampus(campusId) {
@@ -165,29 +220,44 @@ class ManagerMobileModule {
     this.userLocationMarker.bindPopup(`<strong>Vị trí của bạn</strong><br>Độ chính xác: ±${Math.round(accuracy || 5)}m`).openPopup();
   }
 
-  render() {
+  render(resetToToday = false) {
+    if (resetToToday) {
+      this.selectedDate = getTodayDateKey();
+      this.dayLogsCache = null;
+    }
     const users = storage.getUsers();
     const checkpoints = storage.getCheckpoints();
-    const patrolLogs = storage.getPatrolLogs();
+    const allLogs = this.dayLogsCache !== null ? this.dayLogsCache : storage.getPatrolLogs();
+    const dayLogs = allLogs.filter(l => getLogDateKey(l) === this.selectedDate);
     const incidents = storage.getIncidents();
     const activeShift = storage.getActiveShift();
+    const settings = storage.getSettings();
+
+    // Sync date picker value
+    const datePicker = document.getElementById('mgr-map-date-picker');
+    if (datePicker && !datePicker.value) datePicker.value = this.selectedDate;
 
     // Guards
     const guards = users.filter(u => u.role === 'guard');
     const filteredGuards = guards.filter(g => this.selectedCampus === 'all' || g.campusId === this.selectedCampus);
     const onDutyGuards = filteredGuards.filter(g => g.status === 'on_duty');
 
-    // Patrol progress
+    // Daily Patrol progress strictly for this.selectedDate
     let filteredCps = checkpoints.filter(c => this.selectedCampus === 'all' || c.campusId === this.selectedCampus);
     let checkedCount = 0;
+    let overdueCps = [];
+    const cpStatuses = new Map();
+
     filteredCps.forEach(cp => {
-      const hasLog = patrolLogs.some(log => log.checkpointId === cp.id);
-      if (hasLog) checkedCount++;
+      const st = evaluateCheckpointDailyStatus(cp, this.selectedDate, dayLogs, guards, settings);
+      cpStatuses.set(cp.id, st);
+      if (st.status === 'checked') checkedCount++;
+      if (st.isOverdue) overdueCps.push({ cp, st });
     });
     const patrolPercent = filteredCps.length > 0 ? Math.round((checkedCount / filteredCps.length) * 100) : 0;
 
-    // Warnings
-    const distanceWarnings = patrolLogs.filter(l => l.gpsStatus === 'warning_far');
+    // Warnings (GPS + Overdue)
+    const distanceWarnings = dayLogs.filter(l => l.gpsStatus === 'warning_far');
     const openIncidents = incidents.filter(i => i.status !== 'resolved');
 
     // Stats UI
@@ -198,8 +268,10 @@ class ManagerMobileModule {
 
     if (onDutyCountEl) onDutyCountEl.textContent = `${onDutyGuards.length}/${filteredGuards.length}`;
     if (patrolPercentEl) patrolPercentEl.textContent = `${patrolPercent}%`;
-    if (alertsCountEl) alertsCountEl.textContent = distanceWarnings.length;
+    if (alertsCountEl) alertsCountEl.textContent = distanceWarnings.length + overdueCps.length;
     if (openIncidentsEl) openIncidentsEl.textContent = openIncidents.length;
+
+    const patrolLogs = dayLogs;
 
     // Guards List
     const guardListEl = document.getElementById('manager-guard-cards-list');
@@ -354,7 +426,7 @@ class ManagerMobileModule {
     // Alerts
     const alertsListEl = document.getElementById('manager-alerts-feed');
     if (alertsListEl) {
-      if (distanceWarnings.length === 0 && openIncidents.length === 0) {
+      if (distanceWarnings.length === 0 && openIncidents.length === 0 && overdueCps.length === 0) {
         alertsListEl.innerHTML = `
           <div class="py-6 text-center text-xs text-slate-400 bg-white dark:bg-slate-800 rounded-2xl p-4 border border-slate-200 dark:border-slate-700">
             <i class="fa-solid fa-shield-halved text-emerald-500 text-2xl mb-1 block"></i>
@@ -387,15 +459,27 @@ class ManagerMobileModule {
           `);
         });
 
+        overdueCps.forEach(({ cp, st }) => {
+          alertItems.push(`
+            <div class="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs flex items-start gap-2.5">
+              <i class="fa-solid fa-clock-rotate-left text-rose-600 text-sm mt-0.5"></i>
+              <div>
+                <strong class="text-rose-800 dark:text-rose-200">Quá hạn tuần tra:</strong> ${cp.name}
+                <div class="text-[11px] text-slate-600 dark:text-slate-400">Chưa được quét hôm nay (Quá hạn ~${st.overdueMinutes} phút)</div>
+              </div>
+            </div>
+          `);
+        });
+
         alertsListEl.innerHTML = alertItems.join('');
       }
     }
 
     // Google Maps
-    this.initOrUpdateGoogleMap(filteredCps, patrolLogs, activeShift);
+    this.initOrUpdateGoogleMap(filteredCps, patrolLogs, activeShift, cpStatuses);
   }
 
-  initOrUpdateGoogleMap(checkpoints, patrolLogs, activeShift) {
+  initOrUpdateGoogleMap(checkpoints, patrolLogs, activeShift, cpStatuses = new Map()) {
     const mapEl = document.getElementById('manager-mobile-map');
     if (!mapEl || !window.L) return;
 
@@ -453,14 +537,14 @@ class ManagerMobileModule {
 
     checkpoints.forEach(cp => {
       if (!cp.lat || !cp.lng) return;
-      const isChecked = patrolLogs.some(log => log.checkpointId === cp.id);
-      const color = isChecked ? '#10b981' : '#f59e0b';
+      const st = cpStatuses.get(cp.id) || { status: 'unchecked', color: '#ef4444', badgeBg: '#fee2e2', badgeText: '#991b1b', label: 'Chưa quét', latestLog: null };
+      const iconClass = st.status === 'checked' ? 'fa-check' : (st.status === 'due_soon' ? 'fa-clock' : (st.status === 'unassigned' ? 'fa-user-slash' : 'fa-qrcode'));
 
       const customIcon = L.divIcon({
         className: 'google-map-checkpoint-marker',
         html: `
-          <div style="background-color: ${color}; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; border: 2.5px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.4); font-size: 12px; cursor: pointer;">
-            <i class="fa-solid ${isChecked ? 'fa-check' : 'fa-qrcode'}"></i>
+          <div style="background-color: ${st.color}; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; border: 2.5px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.4); font-size: 12px; cursor: pointer;">
+            <i class="fa-solid ${iconClass}"></i>
           </div>
         `,
         iconSize: [28, 28],
@@ -469,17 +553,21 @@ class ManagerMobileModule {
 
       const marker = L.marker([cp.lat, cp.lng], { icon: customIcon });
       const googleMapsDirUrl = `https://www.google.com/maps/dir/?api=1&destination=${cp.lat},${cp.lng}`;
+      const scanDetailHtml = st.latestLog
+        ? `<div style="font-size: 11px; color: #334155; margin-top: 4px;">👤 ${st.latestLog.guardName}<br>🕒 ${getLogTimestampDate(st.latestLog).toLocaleTimeString('vi-VN')} • ${st.latestLog.distanceMeters !== null ? st.latestLog.distanceMeters + 'm' : 'OK'}</div>`
+        : `<div style="font-size: 11px; color: #64748b; margin-top: 4px;">📅 Ngày: ${this.selectedDate}</div>`;
 
       marker.bindPopup(`
-        <div style="font-family: inherit; font-size: 12px; line-height: 1.4; min-width: 170px;">
+        <div style="font-family: inherit; font-size: 12px; line-height: 1.4; min-width: 180px;">
           <strong style="color: #1e40af; font-size: 13px;">${cp.name}</strong><br>
           <span style="color: #64748b;">${cp.campusName || ''} - ${cp.floor || ''}</span><br>
           <div style="margin: 6px 0;">
-            <span style="display: inline-block; padding: 2px 7px; border-radius: 6px; background: ${isChecked ? '#d1fae5; color: #065f46;' : '#fef3c7; color: #92400e;'} font-weight: bold; font-size: 11px;">
-              ${isChecked ? '✓ Đã kiểm tra' : '⏱ Chưa kiểm tra'}
+            <span style="display: inline-block; padding: 2px 7px; border-radius: 6px; background: ${st.badgeBg}; color: ${st.badgeText}; font-weight: bold; font-size: 11px;">
+              ${st.label}
             </span>
           </div>
-          <a href="${googleMapsDirUrl}" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; background: #2563eb; color: white; text-decoration: none; font-size: 11px; font-weight: bold; margin-top: 4px;">
+          ${scanDetailHtml}
+          <a href="${googleMapsDirUrl}" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; background: #2563eb; color: white; text-decoration: none; font-size: 11px; font-weight: bold; margin-top: 6px;">
             <i class="fa-solid fa-diamond-turn-right"></i> Chỉ đường Google Maps
           </a>
         </div>
@@ -699,4 +787,7 @@ class ManagerMobileModule {
 
 export const managerMobileModule = new ManagerMobileModule();
 window.managerMobileModule = managerMobileModule;
-window.renderManagerMobileUI = () => managerMobileModule.render();
+window.renderManagerMobileUI = (resetToToday = false) => {
+  managerMobileModule.populateCampusDropdown();
+  managerMobileModule.render(resetToToday);
+};

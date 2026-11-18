@@ -9,7 +9,7 @@ import { incidentModule } from "./incident.js";
 import { handoverModule } from "./handover.js";
 import { managerMobileModule } from "./manager-mobile.js";
 import { adminModule } from "./admin.js";
-import { initRealtimeFirestoreSync, signInUserWithAuth, signOutUser, sendPasswordReset, SUPER_ADMIN_EMAIL } from "./firebase-config.js";
+import { initRealtimeFirestoreSync, signInUserWithAuth, signOutUser, sendPasswordReset, SUPER_ADMIN_EMAIL, getTodayDateKey, getLogDateKey, isPatrolLogValid } from "./firebase-config.js";
 
 class AppController {
   constructor() {
@@ -41,6 +41,20 @@ class AppController {
     } else {
       this.routeUserByRole(currentUser);
     }
+
+    // Automatic day-change detector: automatically reset daily patrol UI when calendar day rolls over
+    this.lastActiveDateKey = getTodayDateKey();
+    setInterval(() => {
+      const currentDayKey = getTodayDateKey();
+      if (currentDayKey !== this.lastActiveDateKey) {
+        this.lastActiveDateKey = currentDayKey;
+        console.log("📅 New day detected:", currentDayKey, "— refreshing daily patrol statuses.");
+        this.renderHome();
+        if (window.renderPatrolUI) window.renderPatrolUI();
+        if (window.renderDashboardUI) window.renderDashboardUI(true);
+        if (window.renderManagerMobileUI) window.renderManagerMobileUI(true);
+      }
+    }, 60000);
   }
 
   showLoginModal() {
@@ -292,22 +306,15 @@ class AppController {
       dutyStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Đang trực ca 24/24H`;
     }
 
-    // Progress for current 24-hour shift (06:00 today to 06:00 tomorrow)
-    const now = new Date();
-    const shiftStart = new Date(now);
-    if (now.getHours() < 6) shiftStart.setDate(shiftStart.getDate() - 1);
-    shiftStart.setHours(6, 0, 0, 0);
-
-    const shiftEnd = new Date(shiftStart);
-    shiftEnd.setDate(shiftEnd.getDate() + 1);
-    shiftEnd.setHours(6, 0, 0, 0);
+    // Daily patrol progress strictly for TODAY (YYYY-MM-DD) — never carries over yesterday's scans
+    const todayKey = getTodayDateKey();
 
     let checkedCount = 0;
     checkpoints.forEach(cp => {
       const hasChecked = patrolLogs.some(log => {
         if (log.checkpointId !== cp.id) return false;
-        const d = new Date(log.scannedAt);
-        return d >= shiftStart && d < shiftEnd;
+        if (getLogDateKey(log) !== todayKey) return false;
+        return isPatrolLogValid(log);
       });
       if (hasChecked) checkedCount++;
     });

@@ -97,6 +97,7 @@ export const DEFAULT_SHIFTS = [
 
 export const DEFAULT_SETTINGS = {
   maxGpsRadiusMeters: 20, // Mandatory max 20m from QR checkpoint
+  patrolIntervalMinutes: 180, // Cảnh báo nếu chốt quá 180 phút (3 giờ) chưa được quét trong ngày
   enableSoundFeedback: true,
   enableHapticVibration: true,
   scanCooldownSeconds: 5,
