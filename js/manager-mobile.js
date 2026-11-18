@@ -45,11 +45,54 @@ class ManagerMobileModule {
     const list = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
 
     campusSelect.innerHTML = `
-      <option value="all">Tất cả các phân hiệu (Mặc định: 47 Cao Lỗ)</option>
+      <option value="all" ${this.selectedCampus === 'all' ? 'selected' : ''}>Tất cả các phân hiệu (Mặc định: 47 Cao Lỗ)</option>
       ${list.map(c => `
-        <option value="${c.id}">${c.name}</option>
+        <option value="${c.id}" ${this.selectedCampus === c.id ? 'selected' : ''}>${c.name}</option>
       `).join('')}
     `;
+  }
+
+  /**
+   * Match a guard against selectedCampus by campusId, campusName, or main campus fallback
+   */
+  doesGuardMatchCampus(guard, campusId, campusList = []) {
+    if (!campusId || campusId === 'all') return true;
+    if (!guard) return false;
+    if (guard.campusId && guard.campusId === campusId) return true;
+
+    const targetCampus = campusList.find(c => c.id === campusId);
+    if (!targetCampus) return false;
+
+    const gName = (guard.campusName || '').trim().toLowerCase();
+    const cName = (targetCampus.name || '').trim().toLowerCase();
+    const cPrefix = cName.split('-')[0].trim();
+
+    if (gName && (gName === cName || (cPrefix && gName.includes(cPrefix)))) {
+      return true;
+    }
+
+    const isTargetMain = targetCampus.id === 'cs-chinh' || targetCampus.id === 'cs-caolo' || (targetCampus.code || '').toUpperCase() === 'CS-CHINH';
+    if (isTargetMain && !guard.campusId && (!gName || gName.includes('cao lỗ') || gName.includes('trụ sở chính'))) {
+      return true;
+    }
+    return false;
+  }
+
+  async toggleGuardDutyStatus(guardId) {
+    const users = storage.getUsers();
+    const guard = users.find(u => u.id === guardId);
+    if (!guard) return;
+
+    const newStatus = guard.status === 'on_duty' ? 'off_duty' : 'on_duty';
+    try {
+      await updateFirestoreUser(guardId, { status: newStatus });
+      this.render();
+      if (window.renderStaffUI) window.renderStaffUI();
+      if (window.renderRosterUI) window.renderRosterUI();
+      if (window.renderHomeUI) window.renderHomeUI();
+    } catch (err) {
+      alert('Lỗi khi cập nhật trạng thái trực: ' + err.message);
+    }
   }
 
   bindEvents() {
@@ -239,10 +282,13 @@ class ManagerMobileModule {
     const datePicker = document.getElementById('mgr-map-date-picker');
     if (datePicker && !datePicker.value) datePicker.value = this.selectedDate;
 
-    // Guards
+    // Guards filtered by selected campus (strictly show ONLY on-duty guards in active list)
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
     const guards = users.filter(u => u.role === 'guard');
-    const filteredGuards = guards.filter(g => this.selectedCampus === 'all' || g.campusId === this.selectedCampus);
+    const filteredGuards = guards.filter(g => this.doesGuardMatchCampus(g, this.selectedCampus, campusList));
     const onDutyGuards = filteredGuards.filter(g => g.status === 'on_duty');
+    const offDutyHiddenCount = filteredGuards.length - onDutyGuards.length;
 
     // Daily Patrol progress strictly for this.selectedDate
     let filteredCps = checkpoints.filter(c => this.selectedCampus === 'all' || c.campusId === this.selectedCampus);
@@ -275,48 +321,64 @@ class ManagerMobileModule {
 
     const patrolLogs = dayLogs;
 
-    // Guards List
+    // On-Duty Guards List (Strictly hides anyone who is off_duty / Nghỉ ca)
     const guardListEl = document.getElementById('manager-guard-cards-list');
     if (guardListEl) {
-      if (filteredGuards.length === 0) {
+      if (onDutyGuards.length === 0) {
         guardListEl.innerHTML = `
-          <div class="py-6 text-center text-xs text-slate-400 bg-white dark:bg-slate-800 rounded-2xl p-4 border border-slate-200 dark:border-slate-700">
-            <i class="fa-solid fa-user-shield text-2xl text-slate-300 mb-1.5 block"></i>
-            Chưa có nhân viên bảo vệ nào trong hệ thống Firestore.
-            <div class="mt-2 text-[11px] text-blue-600 font-bold">Vào Quản Trị -> Nhân Sự để cấp tài khoản bảo vệ.</div>
+          <div class="py-6 text-center text-xs text-slate-400 bg-white dark:bg-slate-800 rounded-2xl p-4 border border-slate-200 dark:border-slate-700 space-y-1.5">
+            <i class="fa-solid fa-user-clock text-2xl text-slate-300 block"></i>
+            <div class="font-bold text-slate-600 dark:text-slate-300">
+              ${guards.length === 0
+                ? 'Chưa có nhân viên bảo vệ nào trong hệ thống Firestore.'
+                : `Không có nhân sự nào đang trực${this.selectedCampus !== 'all' ? ' tại cơ sở này' : ''}.`}
+            </div>
+            ${offDutyHiddenCount > 0 ? `
+              <div class="text-[11px] text-slate-400">
+                <i class="fa-solid fa-eye-slash mr-1"></i> Đã tự động ẩn ${offDutyHiddenCount} nhân sự đang nghỉ ca. (Bật lại ở bảng Phân Công Ca Trực bên dưới nếu cần.)
+              </div>
+            ` : `
+              <div class="text-[11px] text-blue-600 font-bold">Vào Quản Trị &rarr; Nhân Sự để cấp tài khoản bảo vệ.</div>
+            `}
           </div>
         `;
       } else {
-        guardListEl.innerHTML = filteredGuards.map(g => {
-          const isOn = g.status === 'on_duty';
+        const hiddenNote = offDutyHiddenCount > 0
+          ? `<div class="text-[10px] text-slate-400 px-1 flex items-center justify-between">
+               <span><i class="fa-solid fa-circle-check text-emerald-500 mr-1"></i> Hiển thị ${onDutyGuards.length} nhân sự đang trực</span>
+               <span><i class="fa-solid fa-eye-slash mr-1"></i> Đã ẩn ${offDutyHiddenCount} người nghỉ ca</span>
+             </div>`
+          : '';
+
+        guardListEl.innerHTML = hiddenNote + onDutyGuards.map(g => {
           const lastScan = patrolLogs.find(l => l.guardId === g.id);
           const lastScanTime = lastScan ? new Date(lastScan.scannedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'Chưa có lượt quét';
 
           return `
-            <div class="p-3.5 bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/80 dark:border-slate-700 shadow-xs flex items-center justify-between gap-3">
-              <div class="flex items-center gap-3">
-                <div class="relative">
-                  <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" alt="${g.name}" class="w-11 h-11 rounded-full object-cover border-2 ${isOn ? 'border-emerald-500' : 'border-slate-300'}">
-                  <span class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white dark:border-slate-800 ${isOn ? 'bg-emerald-500' : 'bg-slate-400'}"></span>
+            <div class="p-3.5 bg-white dark:bg-slate-800 rounded-2xl border border-emerald-200/80 dark:border-emerald-800/60 shadow-xs flex items-center justify-between gap-3">
+              <div class="flex items-center gap-3 min-w-0">
+                <div class="relative shrink-0">
+                  <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" alt="${g.name}" class="w-11 h-11 rounded-full object-cover border-2 border-emerald-500">
+                  <span class="absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white dark:border-slate-800 bg-emerald-500"></span>
                 </div>
-                <div>
-                  <div class="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                <div class="min-w-0">
+                  <div class="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-1.5 truncate">
                     ${g.name}
                     <span class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${g.code}</span>
                   </div>
-                  <div class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                    ${g.campusName || 'Cơ sở phân công'}
+                  <div class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
+                    ${g.campusName || 'Trụ sở chính - Số 47 Cao Lỗ'}
                   </div>
-                  <div class="text-[10px] text-blue-600 dark:text-blue-400 font-medium">
+                  <div class="text-[10px] text-blue-600 dark:text-blue-400 font-medium truncate">
                     Ca: <strong>${g.fixedShiftName || g.currentShiftName || 'Ca Trực 24H'}</strong> • Quét gần nhất: <strong>${lastScanTime}</strong>
                   </div>
                 </div>
               </div>
 
               <div class="flex flex-col items-end gap-1.5 shrink-0">
-                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isOn ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400'}">
-                  ${isOn ? 'Đang trực' : 'Nghỉ ca'}
-                </span>
+                <button onclick="window.managerMobileModule.toggleGuardDutyStatus('${g.id}')" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 hover:bg-rose-100 text-emerald-700 hover:text-rose-700 dark:bg-emerald-950/70 dark:text-emerald-300 transition" title="Bấm để chuyển sang Nghỉ ca (ẩn khỏi danh sách đang trực)">
+                  ● Đang trực
+                </button>
                 <div class="flex items-center gap-1">
                   <button onclick="window.managerMobileModule.openChangeShiftModal('${g.id}')" class="px-2 py-1 rounded-lg bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300 font-bold text-[10px] border border-blue-200 dark:border-blue-800 flex items-center gap-1 hover:bg-blue-100 transition" title="Đổi ca trực cố định">
                     <i class="fa-solid fa-clock-rotate-left"></i> Đổi ca
@@ -404,23 +466,34 @@ class ManagerMobileModule {
             <div class="space-y-1.5">
               ${assigned.length === 0 ? `
                 <div class="text-[11px] text-slate-400 py-2.5 text-center bg-white/60 dark:bg-slate-800/60 rounded-xl border border-dashed border-slate-200 dark:border-slate-700">Chưa phân công bảo vệ nào vào ca này</div>
-              ` : assigned.map(g => `
-                <div class="p-2.5 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs shadow-2xs">
-                  <div class="flex items-center gap-2.5">
-                    <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" class="w-8 h-8 rounded-full object-cover border border-slate-200 dark:border-slate-700">
-                    <div>
-                      <div class="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+              ` : assigned.map(g => {
+                const isOn = g.status === 'on_duty';
+                return `
+                <div class="p-2.5 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2 text-xs shadow-2xs">
+                  <div class="flex items-center gap-2.5 min-w-0">
+                    <div class="relative shrink-0">
+                      <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" class="w-8 h-8 rounded-full object-cover border border-slate-200 dark:border-slate-700">
+                      <span class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-white dark:border-slate-800 ${isOn ? 'bg-emerald-500' : 'bg-slate-400'}"></span>
+                    </div>
+                    <div class="min-w-0">
+                      <div class="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1.5 truncate">
                         ${g.name}
                         <span class="text-[9px] font-mono px-1 rounded bg-slate-100 dark:bg-slate-700 text-slate-500">${g.code}</span>
                       </div>
-                      <div class="text-[10px] text-slate-400">${g.campusName || 'Trụ sở chính Cao Lỗ'}</div>
+                      <div class="text-[10px] text-slate-400 truncate">${g.campusName || 'Trụ sở chính Cao Lỗ'}</div>
                     </div>
                   </div>
-                  <button onclick="window.managerMobileModule.openChangeShiftModal('${g.id}')" class="px-2.5 py-1 bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300 font-bold text-[10px] rounded-lg border border-blue-200 dark:border-blue-800 hover:bg-blue-100 transition">
-                    Đổi ca
-                  </button>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button onclick="window.managerMobileModule.toggleGuardDutyStatus('${g.id}')" class="px-2 py-1 rounded-lg text-[10px] font-bold transition ${isOn ? 'bg-emerald-100 text-emerald-700 hover:bg-rose-100 hover:text-rose-700' : 'bg-slate-100 text-slate-500 hover:bg-emerald-100 hover:text-emerald-700'}" title="Bật/tắt Đang trực">
+                      ${isOn ? 'Đang trực' : 'Nghỉ ca'}
+                    </button>
+                    <button onclick="window.managerMobileModule.openChangeShiftModal('${g.id}')" class="px-2 py-1 bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300 font-bold text-[10px] rounded-lg border border-blue-200 dark:border-blue-800 hover:bg-blue-100 transition">
+                      Đổi ca
+                    </button>
+                  </div>
                 </div>
-              `).join('')}
+              `;
+              }).join('')}
             </div>
 
             <button onclick="window.managerMobileModule.openQuickAssignModal('${sDef.name}')" class="w-full py-2 bg-white/80 dark:bg-slate-800/80 hover:bg-white text-blue-600 dark:text-blue-400 font-bold text-[11px] rounded-xl border border-dashed border-blue-200 dark:border-blue-800 transition flex items-center justify-center gap-1.5 shadow-2xs">

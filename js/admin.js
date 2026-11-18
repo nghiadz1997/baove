@@ -48,7 +48,14 @@ class AdminDesktopModule {
     this.dashboardShift = 'all';
     this.dashboardGuard = 'all';
     this.dashboardCampus = 'all';
+    this.dashboardDutyCampus = 'all';
     this.dashboardLogsCache = null;
+
+    // Staff & Roster on-duty filter state
+    this.staffFilterCampus = 'all';
+    this.staffFilterStatus = 'on_duty'; // Default: only show on-duty staff (hide off_duty)
+    this.rosterFilterCampus = 'all';
+    this.rosterOnlyOnDuty = false;
 
     // Patrol Logs filter state
     this.logFilterFrom = getTodayDateKey();
@@ -208,6 +215,73 @@ class AdminDesktopModule {
     this.renderDashboard(document.getElementById('admin-content-pane'));
   }
 
+  /**
+   * Match a user/guard against a campusId (checks campusId, campusName, and main campus fallback)
+   */
+  doesUserMatchCampus(user, campusId, campusList = []) {
+    if (!campusId || campusId === 'all') return true;
+    if (!user) return false;
+    if (user.campusId && user.campusId === campusId) return true;
+
+    const targetCampus = campusList.find(c => c.id === campusId);
+    if (!targetCampus) return false;
+
+    const uName = (user.campusName || '').trim().toLowerCase();
+    const cName = (targetCampus.name || '').trim().toLowerCase();
+    const cPrefix = cName.split('-')[0].trim();
+
+    if (uName && (uName === cName || (cPrefix && uName.includes(cPrefix)))) {
+      return true;
+    }
+
+    const isTargetMain = targetCampus.id === 'cs-chinh' || targetCampus.id === 'cs-caolo' || (targetCampus.code || '').toUpperCase() === 'CS-CHINH';
+    if (isTargetMain && !user.campusId && (!uName || uName.includes('cao lỗ') || uName.includes('trụ sở chính'))) {
+      return true;
+    }
+    return false;
+  }
+
+  setDashboardDutyCampus(campusVal) {
+    this.dashboardDutyCampus = campusVal || 'all';
+    this.renderDashboard(document.getElementById('admin-content-pane'));
+  }
+
+  setStaffFilterCampus(campusVal) {
+    this.staffFilterCampus = campusVal || 'all';
+    this.renderStaff(document.getElementById('admin-content-pane'));
+  }
+
+  setStaffFilterStatus(statusVal) {
+    this.staffFilterStatus = statusVal || 'on_duty';
+    this.renderStaff(document.getElementById('admin-content-pane'));
+  }
+
+  setRosterFilterCampus(campusVal) {
+    this.rosterFilterCampus = campusVal || 'all';
+    this.renderRoster(document.getElementById('admin-content-pane'));
+  }
+
+  toggleRosterOnlyOnDuty() {
+    this.rosterOnlyOnDuty = !this.rosterOnlyOnDuty;
+    this.renderRoster(document.getElementById('admin-content-pane'));
+  }
+
+  async toggleGuardDutyStatus(userId) {
+    const users = storage.getUsers();
+    const target = users.find(u => u.id === userId);
+    if (!target) return;
+
+    const newStatus = target.status === 'on_duty' ? 'off_duty' : 'on_duty';
+    try {
+      await updateFirestoreUser(userId, { status: newStatus });
+      this.renderModule(this.currentModule);
+      if (window.renderManagerMobileUI) window.renderManagerMobileUI();
+      if (window.renderHomeUI) window.renderHomeUI();
+    } catch (err) {
+      alert('Lỗi khi cập nhật trạng thái ca trực: ' + err.message);
+    }
+  }
+
   focusCheckpointOnMap(lat, lng) {
     if (this.adminGoogleMap && lat && lng) {
       this.adminGoogleMap.flyTo([parseFloat(lat), parseFloat(lng)], 19, { duration: 1.0 });
@@ -232,7 +306,10 @@ class AdminDesktopModule {
     const shiftList = shifts.length > 0 ? shifts : DEFAULT_SHIFTS;
 
     const guards = users.filter(u => u.role === 'guard');
-    const onDutyCount = guards.filter(g => g.status === 'on_duty').length;
+    const onDutyAllGuards = guards.filter(g => g.status === 'on_duty');
+    const onDutyCount = onDutyAllGuards.length;
+    const onDutyCampusGuards = onDutyAllGuards.filter(g => this.doesUserMatchCampus(g, this.dashboardDutyCampus, campusList));
+    const offDutyHiddenInCampusCount = guards.filter(g => g.status !== 'on_duty' && this.doesUserMatchCampus(g, this.dashboardDutyCampus, campusList)).length;
     const unresolvedIncidents = incidents.filter(i => i.status !== 'resolved').length;
 
     // Filter checkpoints by selected campus
@@ -487,42 +564,70 @@ class AdminDesktopModule {
             </div>
           </div>
 
-          <!-- Quick Actions & User Roster -->
+          <!-- On-Duty Staff Roster Filtered by Campus (Strictly Hides Off-Duty Staff) -->
           <div class="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col justify-between">
             <div>
-              <div class="flex items-center justify-between mb-3">
-                <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Lực Lượng Bảo Vệ</h4>
-                <button onclick="window.adminModule.openAddStaffModal()" class="text-xs font-bold text-blue-600 hover:underline">
+              <div class="flex items-center justify-between gap-2 mb-2.5">
+                <div class="flex items-center gap-2">
+                  <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Nhân Sự Đang Trực</h4>
+                  <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 font-mono">
+                    ${onDutyCampusGuards.length} đang trực
+                  </span>
+                </div>
+                <button onclick="window.adminModule.openAddStaffModal()" class="text-xs font-bold text-blue-600 hover:underline shrink-0">
                   + Cấp tài khoản
                 </button>
               </div>
+
+              <!-- Campus Filter for On-Duty Staff -->
+              <div class="mb-3 space-y-1.5">
+                <select id="dashboard-duty-campus-filter" onchange="window.adminModule.setDashboardDutyCampus(this.value)" class="w-full px-2.5 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-700 dark:text-slate-200">
+                  <option value="all" ${this.dashboardDutyCampus === 'all' ? 'selected' : ''}>🏢 Tất cả cơ sở (${onDutyAllGuards.length} đang trực)</option>
+                  ${campusList.map(c => {
+                    const cOnCount = onDutyAllGuards.filter(g => this.doesUserMatchCampus(g, c.id, campusList)).length;
+                    return `<option value="${c.id}" ${this.dashboardDutyCampus === c.id ? 'selected' : ''}>${c.name} (${cOnCount} đang trực)</option>`;
+                  }).join('')}
+                </select>
+                <div class="flex items-center justify-between text-[10px] text-slate-400 px-0.5">
+                  <span><i class="fa-solid fa-eye-slash mr-1"></i> Tự động ẩn nhân sự nghỉ ca (${offDutyHiddenInCampusCount} đã ẩn)</span>
+                  <button onclick="window.adminModule.setStaffFilterStatus('all'); window.adminModule.switchModule('staff')" class="text-blue-600 hover:underline font-bold">
+                    Quản lý ca &rarr;
+                  </button>
+                </div>
+              </div>
               
-              <div class="space-y-3 overflow-y-auto max-h-96 pr-1">
-                ${guards.length === 0 ? `
-                  <div class="py-8 text-center text-xs text-slate-400">
-                    Chưa có nhân viên bảo vệ trong Firestore.<br>
-                    Bấm "+ Cấp tài khoản" để thêm nhân sự thật.
+              <div class="space-y-2.5 overflow-y-auto max-h-80 pr-1">
+                ${onDutyCampusGuards.length === 0 ? `
+                  <div class="py-8 px-3 text-center text-xs text-slate-400 bg-slate-50/70 dark:bg-slate-900/40 rounded-xl border border-dashed border-slate-200 dark:border-slate-700 space-y-2">
+                    <i class="fa-solid fa-user-clock text-2xl text-slate-300 block"></i>
+                    <div class="font-bold text-slate-600 dark:text-slate-300">Không có nhân sự nào đang trực${this.dashboardDutyCampus !== 'all' ? ' tại cơ sở này' : ''}.</div>
+                    <div class="text-[11px]">${offDutyHiddenInCampusCount > 0 ? `Có ${offDutyHiddenInCampusCount} bảo vệ đang nghỉ ca (không hiển thị ở danh sách đang trực).` : 'Chưa có bảo vệ nào được bật trạng thái Đang trực.'}</div>
+                    <button onclick="window.adminModule.setStaffFilterStatus('all'); window.adminModule.switchModule('staff')" class="mt-1 px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[11px]">
+                      <i class="fa-solid fa-user-check mr-1"></i> Bật trạng thái Đang trực
+                    </button>
                   </div>
-                ` : guards.map(g => {
-                  const isOn = g.status === 'on_duty';
+                ` : onDutyCampusGuards.map(g => {
                   const guardDayScans = dayLogs.filter(l => l.guardId === g.id && isPatrolLogValid(l)).length;
                   return `
-                    <div class="p-3 rounded-xl border border-slate-100 dark:border-slate-700 flex items-center justify-between">
+                    <div class="p-3 rounded-xl border border-emerald-200/70 dark:border-emerald-800/50 bg-emerald-50/20 dark:bg-emerald-950/10 flex items-center justify-between gap-2">
                       <div class="flex items-center gap-3 min-w-0">
-                        <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" class="w-10 h-10 rounded-full object-cover shrink-0">
+                        <div class="relative shrink-0">
+                          <img src="${g.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}" class="w-10 h-10 rounded-full object-cover border-2 border-emerald-500">
+                          <span class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-white dark:border-slate-800"></span>
+                        </div>
                         <div class="min-w-0">
                           <div class="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-1.5 truncate">
                             ${g.name}
                             <span class="text-[10px] text-blue-600 font-bold">(${g.code})</span>
                           </div>
-                          <div class="text-[11px] text-slate-500 truncate">${g.fixedShiftName || 'Ca Trực 24H'}</div>
-                          <div class="text-[10px] text-emerald-600 font-bold">Ngày ${displayDateVN}: ${guardDayScans} lượt quét</div>
+                          <div class="text-[10px] text-slate-500 truncate">${g.campusName || 'Trụ sở chính - Số 47 Cao Lỗ'}</div>
+                          <div class="text-[10px] text-emerald-600 font-bold truncate">${g.fixedShiftName || 'Ca Trực 24H'} • ${guardDayScans} quét</div>
                         </div>
                       </div>
-                      <div class="flex items-center gap-1.5 shrink-0">
-                        <span class="px-2 py-0.5 rounded text-[10px] font-bold ${isOn ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}">
-                          ${isOn ? 'Đang trực' : 'Nghỉ ca'}
-                        </span>
+                      <div class="flex items-center gap-1 shrink-0">
+                        <button onclick="window.adminModule.toggleGuardDutyStatus('${g.id}')" class="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-100 hover:bg-rose-100 text-emerald-700 hover:text-rose-700 transition" title="Bấm để chuyển sang Nghỉ ca (sẽ ẩn khỏi danh sách đang trực)">
+                          Đang trực
+                        </button>
                         <button onclick="window.adminModule.openEditStaffModal('${g.id}')" class="text-blue-600 hover:text-blue-800 text-xs px-1.5 py-0.5 rounded hover:bg-blue-50" title="Chỉnh sửa thông tin">
                           <i class="fa-solid fa-pen-to-square"></i>
                         </button>
@@ -799,20 +904,60 @@ class AdminDesktopModule {
   }
 
   /**
-   * 2. Staff Management (Direct Firestore Integration & Full Edit)
+   * 2. Staff Management (Direct Firestore Integration, Campus & On-Duty Filtering)
    */
   renderStaff(container) {
     const users = storage.getUsers();
+    const campuses = storage.getCampuses();
+    const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+
+    // Filter by campus first
+    const campusMatchedUsers = users.filter(u => this.doesUserMatchCampus(u, this.staffFilterCampus, campusList));
+    const onDutyCountInCampus = campusMatchedUsers.filter(u => u.status === 'on_duty').length;
+    const offDutyCountInCampus = campusMatchedUsers.filter(u => u.status !== 'on_duty').length;
+
+    // Strictly hide off-duty staff when filter is 'on_duty' (default)
+    const filteredUsers = this.staffFilterStatus === 'on_duty'
+      ? campusMatchedUsers.filter(u => u.status === 'on_duty')
+      : campusMatchedUsers;
+
     container.innerHTML = `
       <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
         <div class="flex items-center justify-between flex-wrap gap-2">
           <div>
             <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100">Quản Lý Nhân Sự & Phân Quyền Firebase Auth</h4>
-            <p class="text-xs text-slate-500">Super Admin: <strong class="text-blue-600 font-mono">${SUPER_ADMIN_EMAIL}</strong> • Chỉnh sửa thông tin, ca trực cố định và phân quyền trực tiếp vào Firestore</p>
+            <p class="text-xs text-slate-500">Super Admin: <strong class="text-blue-600 font-mono">${SUPER_ADMIN_EMAIL}</strong> • Lọc nhanh nhân sự đang trực theo cơ sở (ẩn người nghỉ ca)</p>
           </div>
           <button onclick="window.adminModule.openAddStaffModal()" class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm transition">
             <i class="fa-solid fa-user-plus mr-1.5"></i> + Cấp tài khoản mới (Firebase Auth)
           </button>
+        </div>
+
+        <!-- Campus & On-Duty Filter Toolbar -->
+        <div class="flex items-center justify-between flex-wrap gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700">
+          <div class="flex items-center flex-wrap gap-2">
+            <label for="staff-campus-filter" class="text-xs font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+              <i class="fa-solid fa-building text-blue-600"></i> Lọc theo cơ sở:
+            </label>
+            <select id="staff-campus-filter" onchange="window.adminModule.setStaffFilterCampus(this.value)" class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200 min-w-[220px]">
+              <option value="all" ${this.staffFilterCampus === 'all' ? 'selected' : ''}>Tất cả cơ sở (${users.filter(u => u.status === 'on_duty').length} đang trực)</option>
+              ${campusList.map(c => {
+                const cOn = users.filter(u => u.status === 'on_duty' && this.doesUserMatchCampus(u, c.id, campusList)).length;
+                return `<option value="${c.id}" ${this.staffFilterCampus === c.id ? 'selected' : ''}>${c.name} (${cOn} đang trực)</option>`;
+              }).join('')}
+            </select>
+          </div>
+
+          <div class="flex items-center gap-1.5 flex-wrap text-xs">
+            <button onclick="window.adminModule.setStaffFilterStatus('on_duty')" class="px-3 py-1.5 rounded-lg font-bold transition flex items-center gap-1.5 ${this.staffFilterStatus === 'on_duty' ? 'bg-emerald-600 text-white shadow-xs' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'}">
+              <span class="w-2 h-2 rounded-full ${this.staffFilterStatus === 'on_duty' ? 'bg-white' : 'bg-emerald-500'}"></span>
+              Đang trực (${onDutyCountInCampus}) • Ẩn nghỉ ca
+            </button>
+            <button onclick="window.adminModule.setStaffFilterStatus('all')" class="px-3 py-1.5 rounded-lg font-bold transition flex items-center gap-1.5 ${this.staffFilterStatus === 'all' ? 'bg-blue-600 text-white shadow-xs' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'}">
+              <i class="fa-solid fa-users text-[11px]"></i>
+              Tất cả (${campusMatchedUsers.length}${offDutyCountInCampus > 0 ? ` • ${offDutyCountInCampus} nghỉ ca` : ''})
+            </button>
+          </div>
         </div>
 
         <div class="overflow-x-auto">
@@ -825,14 +970,21 @@ class AdminDesktopModule {
                 <th class="p-3">Phân quyền</th>
                 <th class="p-3">Ca cố định</th>
                 <th class="p-3">Cơ sở phụ trách</th>
-                <th class="p-3">Trạng thái</th>
+                <th class="p-3">Trạng thái ca</th>
                 <th class="p-3 text-right">Thao tác</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
-              ${users.length === 0 ? `
-                <tr><td colspan="8" class="p-8 text-center text-slate-400">Chưa có tài khoản nào trong hệ thống. Bấm "+ Cấp tài khoản mới" ở trên để tạo.</td></tr>
-              ` : users.map(u => {
+              ${filteredUsers.length === 0 ? `
+                <tr><td colspan="8" class="p-8 text-center text-slate-400">
+                  ${users.length === 0
+                    ? 'Chưa có tài khoản nào trong hệ thống. Bấm "+ Cấp tài khoản mới" ở trên để tạo.'
+                    : (this.staffFilterStatus === 'on_duty'
+                      ? `Không có nhân sự nào đang trực${this.staffFilterCampus !== 'all' ? ' tại cơ sở này' : ''}. (${offDutyCountInCampus} nhân sự nghỉ ca đang được ẩn — bấm nút "Tất cả" ở trên để xem hoặc bật lại Đang trực.)`
+                      : 'Không có nhân sự nào thuộc cơ sở đã chọn.')
+                  }
+                </td></tr>
+              ` : filteredUsers.map(u => {
                 const isSuper = u.email === SUPER_ADMIN_EMAIL || u.isSuperAdmin;
                 const isOn = u.status === 'on_duty';
                 return `
@@ -861,11 +1013,12 @@ class AdminDesktopModule {
                         ${u.fixedShiftName || u.currentShiftName || 'Ca Trực 24H (06:00 - 06:00 hôm sau)'}
                       </span>
                     </td>
-                    <td class="p-3">${u.campusName || 'Trụ sở Cao Lỗ'}</td>
+                    <td class="p-3">${u.campusName || 'Trụ sở chính - Số 47 Cao Lỗ'}</td>
                     <td class="p-3">
-                      <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isOn ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}">
-                        ${isOn ? 'Đang trực' : (u.status === 'off_duty' ? 'Nghỉ ca' : (u.status || 'Hoạt động'))}
-                      </span>
+                      <button onclick="window.adminModule.toggleGuardDutyStatus('${u.id}')" class="px-2.5 py-1 rounded-full text-[10px] font-bold transition inline-flex items-center gap-1 ${isOn ? 'bg-emerald-100 hover:bg-rose-100 text-emerald-700 hover:text-rose-700' : 'bg-slate-100 hover:bg-emerald-100 text-slate-500 hover:text-emerald-700'}" title="Bấm để chuyển nhanh Đang trực / Nghỉ ca">
+                        <span class="w-1.5 h-1.5 rounded-full ${isOn ? 'bg-emerald-500' : 'bg-slate-400'}"></span>
+                        ${isOn ? 'Đang trực' : (u.status === 'off_duty' ? 'Nghỉ ca' : 'Nghỉ ca')}
+                      </button>
                     </td>
                     <td class="p-3 text-right">
                       <div class="flex items-center justify-end gap-1.5">
@@ -971,7 +1124,7 @@ class AdminDesktopModule {
               <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Cơ sở phân công</label>
               <select id="edit-staff-campus" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
                 ${campusList.map(c => `
-                  <option value="${c.name}" ${user.campusName === c.name ? 'selected' : ''}>${c.name}</option>
+                  <option value="${c.id}" ${(user.campusId === c.id || user.campusName === c.name) ? 'selected' : ''}>${c.name}</option>
                 `).join('')}
               </select>
             </div>
@@ -1002,7 +1155,9 @@ class AdminDesktopModule {
       const fixedShiftName = document.getElementById('edit-staff-shift').value;
       const role = document.getElementById('edit-staff-role').value;
       const status = document.getElementById('edit-staff-status').value;
-      const campusName = document.getElementById('edit-staff-campus').value;
+      const campusId = document.getElementById('edit-staff-campus').value;
+      const selectedCampusObj = campusList.find(c => c.id === campusId);
+      const campusName = selectedCampusObj ? selectedCampusObj.name : (user.campusName || 'Trụ sở chính - Số 47 Cao Lỗ');
       const newPass = document.getElementById('edit-staff-pass').value.trim();
 
       const btn = document.getElementById('btn-submit-edit-staff');
@@ -1015,6 +1170,7 @@ class AdminDesktopModule {
         phone,
         fixedShiftName,
         currentShiftName: fixedShiftName,
+        campusId: selectedCampusObj ? selectedCampusObj.id : (user.campusId || 'cs-chinh'),
         campusName,
         status,
         role: user.email === SUPER_ADMIN_EMAIL ? 'admin' : role
@@ -1028,7 +1184,9 @@ class AdminDesktopModule {
         await updateFirestoreUser(userId, updates);
         document.getElementById('modal-edit-staff').remove();
         alert(`✅ Đã cập nhật thành công thông tin nhân viên ${name} vào Firestore!`);
-        this.renderStaff(document.getElementById('admin-content-pane'));
+        this.renderModule(this.currentModule);
+        if (window.renderManagerMobileUI) window.renderManagerMobileUI();
+        if (window.renderHomeUI) window.renderHomeUI();
       } catch (err) {
         btn.disabled = false;
         btn.innerHTML = 'Lưu Thay Đổi vào Firestore';
@@ -1099,11 +1257,20 @@ class AdminDesktopModule {
               </div>
             </div>
 
-            <div>
-              <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Cơ sở phân công</label>
-              <select id="staff-campus" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
-                ${campusList.map(c => `<option value="${c.name}">${c.name}</option>`).join('')}
-              </select>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Cơ sở phân công</label>
+                <select id="staff-campus" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
+                  ${campusList.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Trạng thái ca</label>
+                <select id="staff-status" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-bold">
+                  <option value="on_duty" selected>🟢 Đang trực</option>
+                  <option value="off_duty">⚪ Nghỉ ca</option>
+                </select>
+              </div>
             </div>
 
             <div class="pt-2 flex justify-end gap-2">
@@ -1127,7 +1294,10 @@ class AdminDesktopModule {
       const phone = document.getElementById('staff-phone').value.trim();
       const fixedShiftName = document.getElementById('staff-fixed-shift').value;
       const role = document.getElementById('staff-role').value;
-      const campusName = document.getElementById('staff-campus').value;
+      const campusId = document.getElementById('staff-campus').value;
+      const selectedCampusObj = campusList.find(c => c.id === campusId);
+      const campusName = selectedCampusObj ? selectedCampusObj.name : 'Trụ sở chính - Số 47 Cao Lỗ';
+      const status = document.getElementById('staff-status')?.value || 'on_duty';
 
       const submitBtn = document.getElementById('btn-submit-add-staff');
       submitBtn.disabled = true;
@@ -1143,12 +1313,13 @@ class AdminDesktopModule {
           fixedShiftName,
           currentShiftName: fixedShiftName,
           role,
-          campusName
+          campusId: selectedCampusObj ? selectedCampusObj.id : 'cs-chinh',
+          campusName,
+          status
         });
         document.getElementById('modal-add-staff').remove();
         alert(`🎉 TẠO TÀI KHOẢN THÀNH CÔNG!\n\nEmail: ${email}\nHọ tên: ${name}\nMã NV: ${code}\nPhân quyền: ${role.toUpperCase()}\nCa cố định: ${fixedShiftName}\nCơ sở: ${campusName}\n\nTài khoản đã được tạo trực tiếp trong Firebase Authentication và cấp quyền trong hệ thống!`);
-        this.renderStaff(document.getElementById('admin-content-pane'));
-        if (window.renderStaffUI) window.renderStaffUI();
+        this.renderModule(this.currentModule);
         if (window.renderRosterUI) window.renderRosterUI();
         if (window.renderManagerMobileUI) window.renderManagerMobileUI();
       } catch (err) {
@@ -2338,9 +2509,14 @@ class AdminDesktopModule {
    */
   renderRoster(container) {
     const users = storage.getUsers();
-    const guards = users.filter(u => u.role === 'guard');
+    const allGuards = users.filter(u => u.role === 'guard');
     const campuses = storage.getCampuses();
     const campusList = campuses.length > 0 ? campuses : OFFICIAL_CAMPUSES;
+
+    // Filter guards by selected campus and optional on-duty-only toggle
+    const campusGuards = allGuards.filter(g => this.doesUserMatchCampus(g, this.rosterFilterCampus, campusList));
+    const guards = this.rosterOnlyOnDuty ? campusGuards.filter(g => g.status === 'on_duty') : campusGuards;
+    const hiddenOffDutyCount = this.rosterOnlyOnDuty ? campusGuards.filter(g => g.status !== 'on_duty').length : 0;
 
     const ca24hGuards = guards.filter(g => {
       const s = g.fixedShiftName || g.currentShiftName || '';
@@ -2348,7 +2524,7 @@ class AdminDesktopModule {
     });
     const kip1Guards = guards.filter(g => (g.fixedShiftName || g.currentShiftName || '').includes('Kíp 1'));
     const kip2Guards = guards.filter(g => (g.fixedShiftName || g.currentShiftName || '').includes('Kíp 2'));
-    const staffingSummary = evaluateCampusShiftStaffing(campusList, guards);
+    const staffingSummary = evaluateCampusShiftStaffing(campusList, allGuards);
 
     container.innerHTML = `
       <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-5">
@@ -2359,8 +2535,16 @@ class AdminDesktopModule {
             </h4>
             <p class="text-xs text-slate-500">Định biên chuẩn: <strong>Cơ sở chính 2 bảo vệ / 1 ca</strong> • <strong>Cơ sở phụ 1 bảo vệ / 1 ca</strong> (Ca 24H: 06:00 hôm nay - 06:00 sáng mai)</p>
           </div>
-          <div class="flex items-center gap-2">
-            <button onclick="window.adminModule.openQuickAssignShiftModal()" class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm transition flex items-center gap-1.5">
+          <div class="flex items-center flex-wrap gap-2">
+            <select onchange="window.adminModule.setRosterFilterCampus(this.value)" class="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-700 dark:text-slate-200">
+              <option value="all" ${this.rosterFilterCampus === 'all' ? 'selected' : ''}>🏢 Tất cả cơ sở</option>
+              ${campusList.map(c => `<option value="${c.id}" ${this.rosterFilterCampus === c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
+            </select>
+            <button onclick="window.adminModule.toggleRosterOnlyOnDuty()" class="px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border ${this.rosterOnlyOnDuty ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-600 hover:bg-slate-50'}">
+              <i class="fa-solid ${this.rosterOnlyOnDuty ? 'fa-eye-slash' : 'fa-filter'}"></i>
+              ${this.rosterOnlyOnDuty ? `Chỉ hiện đang trực (đã ẩn ${hiddenOffDutyCount} nghỉ ca)` : 'Lọc: Chỉ hiện đang trực'}
+            </button>
+            <button onclick="window.adminModule.openQuickAssignShiftModal()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm transition flex items-center gap-1.5">
               <i class="fa-solid fa-user-plus"></i> + Phân công ca trực cho bảo vệ
             </button>
           </div>
@@ -2514,9 +2698,14 @@ class AdminDesktopModule {
               <div class="text-[10px] text-slate-400">${g.phone || 'Chưa có SĐT'}</div>
             </div>
           </div>
-          <button onclick="window.adminModule.openQuickAssignShiftModal('${g.id}')" class="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg text-xs font-bold transition flex items-center gap-1" title="Chỉnh sửa chi tiết">
-            <i class="fa-solid fa-pen-to-square text-[10px]"></i> Sửa
-          </button>
+          <div class="flex items-center gap-1">
+            <button onclick="window.adminModule.toggleGuardDutyStatus('${g.id}')" class="px-2 py-1 rounded-lg text-[10px] font-bold transition ${isOn ? 'bg-emerald-100 hover:bg-rose-100 text-emerald-700 hover:text-rose-700' : 'bg-slate-100 hover:bg-emerald-100 text-slate-500 hover:text-emerald-700'}" title="Bấm để đổi nhanh Đang trực / Nghỉ ca">
+              ${isOn ? 'Đang trực' : 'Nghỉ ca'}
+            </button>
+            <button onclick="window.adminModule.openQuickAssignShiftModal('${g.id}')" class="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg text-xs font-bold transition flex items-center gap-1" title="Chỉnh sửa chi tiết">
+              <i class="fa-solid fa-pen-to-square text-[10px]"></i> Sửa
+            </button>
+          </div>
         </div>
 
         <!-- Inline Quick Controls -->

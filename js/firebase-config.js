@@ -763,7 +763,7 @@ export async function sendPasswordReset(email) {
  * Create a new user account in Firebase Authentication & Firestore (Admin only)
  */
 export async function createStaffAccountInAuthAndFirestore(staffData) {
-  const { email, password, name, code, phone, role, campusName, fixedShiftName, currentShiftName } = staffData;
+  const { email, password, name, code, phone, role, campusId, campusName, fixedShiftName, currentShiftName, status } = staffData;
   const cleanEmail = email.trim().toLowerCase();
 
   let uid = 'u-' + Date.now();
@@ -794,10 +794,11 @@ export async function createStaffAccountInAuthAndFirestore(staffData) {
     code: code.trim().toUpperCase(),
     phone: (phone || '').trim(),
     role: role || 'guard',
+    campusId: campusId || 'cs-chinh',
     campusName: campusName || 'Trụ sở chính - Số 47 Cao Lỗ',
     fixedShiftName: fixedShiftName || 'Ca Trực 24H (06:00 - 06:00 hôm sau)',
     currentShiftName: currentShiftName || fixedShiftName || 'Ca Trực 24H (06:00 - 06:00 hôm sau)',
-    status: 'off_duty',
+    status: status || 'off_duty',
     isSuperAdmin: cleanEmail === SUPER_ADMIN_EMAIL,
     avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
     createdAt: new Date().toISOString()
