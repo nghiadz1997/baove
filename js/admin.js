@@ -1381,8 +1381,8 @@ class AdminDesktopModule {
    * 4. Campuses Management (Customize GPS for All Branches and Main Campus)
    */
   renderCampuses(container) {
-    const rawCampuses = storage.getCampuses();
-    const campuses = rawCampuses.length > 0 ? rawCampuses : OFFICIAL_CAMPUSES;
+    if (!container) return;
+    const campuses = storage.getCampuses();
 
     container.innerHTML = `
       <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
@@ -1391,17 +1391,25 @@ class AdminDesktopModule {
             <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100 flex items-center gap-2">
               <i class="fa-solid fa-school text-blue-600"></i> Quản Lý Cơ Sở & Tùy Chỉnh Tọa Độ GPS (Google Maps)
             </h4>
-            <p class="text-xs text-slate-500">Super Administrator có thể điều chỉnh trực tiếp tọa độ GPS tâm và bán kính geofence cho <strong>Trụ sở chính</strong> và tất cả các phân hiệu</p>
+            <p class="text-xs text-slate-500">Super Administrator có thể thêm, xóa, chỉnh sửa trực tiếp tọa độ GPS tâm và bán kính geofence — đồng bộ thời gian thực với Firebase Firestore</p>
           </div>
           <button onclick="window.adminModule.openAddCampusModal()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm transition">
             <i class="fa-solid fa-plus mr-1.5"></i> + Thêm phân hiệu mới
           </button>
         </div>
 
+        ${campuses.length === 0 ? `
+          <div class="p-8 text-center text-xs text-slate-400 border border-dashed border-slate-200 dark:border-slate-700 rounded-2xl">
+            Chưa có cơ sở / phân hiệu nào trên Firestore. Nhấn <strong>"+ Thêm phân hiệu mới"</strong> để tạo mới.
+          </div>
+        ` : `
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           ${campuses.map(c => {
             const isMain = c.id === 'cs-chinh' || c.id === 'cs-caolo';
             const radius = c.radiusMeters || c.radius || 150;
+            const latVal = parseFloat(c.lat);
+            const lngVal = parseFloat(c.lng);
+            const hasCoords = !isNaN(latVal) && !isNaN(lngVal);
             return `
               <div class="p-5 rounded-2xl border ${isMain ? 'border-blue-400 dark:border-blue-500 bg-blue-50/20 dark:bg-slate-900/60 shadow-sm' : 'border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/50'} hover:border-blue-500 transition shadow-xs flex flex-col justify-between">
                 <div>
@@ -1419,14 +1427,14 @@ class AdminDesktopModule {
 
                   <h5 class="font-bold text-base text-slate-800 dark:text-slate-100 mt-1">${c.name}</h5>
                   <p class="text-xs text-slate-600 dark:text-slate-400 mt-1.5 leading-relaxed">
-                    <i class="fa-solid fa-location-dot text-rose-500 mr-1.5"></i> ${c.address}
+                    <i class="fa-solid fa-location-dot text-rose-500 mr-1.5"></i> ${c.address || 'Chưa cập nhật địa chỉ'}
                   </p>
 
                   <div class="mt-3 p-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200/80 dark:border-slate-700 text-xs space-y-1.5">
                     <div class="flex items-center justify-between">
                       <span class="text-slate-400">Tọa độ GPS tâm:</span>
                       <span class="font-mono font-bold text-blue-600 dark:text-blue-400">
-                        ${c.lat ? c.lat.toFixed(6) : '—'}, ${c.lng ? c.lng.toFixed(6) : '—'}
+                        ${hasCoords ? `${latVal.toFixed(6)}, ${lngVal.toFixed(6)}` : '—'}
                       </span>
                     </div>
                     <div class="flex items-center justify-between">
@@ -1448,7 +1456,7 @@ class AdminDesktopModule {
                     ` : ''}
                   </div>
 
-                  <a href="https://www.google.com/maps?q=${c.lat},${c.lng}" target="_blank" class="px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 dark:bg-slate-800 dark:text-blue-400 font-bold hover:bg-blue-100 transition flex items-center gap-1 text-xs">
+                  <a href="https://www.google.com/maps?q=${hasCoords ? `${latVal},${lngVal}` : '10.735768115549721,106.68071864291426'}" target="_blank" class="px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 dark:bg-slate-800 dark:text-blue-400 font-bold hover:bg-blue-100 transition flex items-center gap-1 text-xs">
                     <i class="fa-brands fa-google"></i> Mở Google Maps
                   </a>
                 </div>
@@ -1456,6 +1464,7 @@ class AdminDesktopModule {
             `;
           }).join('')}
         </div>
+        `}
       </div>
     `;
   }
@@ -1548,12 +1557,17 @@ class AdminDesktopModule {
       </div>
     `;
 
+    document.getElementById('modal-edit-campus')?.remove();
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
     // Initialize Campus Map Picker
     setTimeout(() => {
       const pickerEl = document.getElementById('edit-campus-google-map');
       if (pickerEl && window.L) {
+        if (this.campusPickerMap) {
+          try { this.campusPickerMap.remove(); } catch (e) {}
+          this.campusPickerMap = null;
+        }
         this.campusPickerMap = L.map('edit-campus-google-map', { zoomControl: true, attributionControl: false }).setView([initLat, initLng], 17);
 
         L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', { maxZoom: 20 }).addTo(this.campusPickerMap);
@@ -1587,6 +1601,18 @@ class AdminDesktopModule {
           this.campusPickerMarker.setLatLng(e.latlng);
           updatePickerPos(e.latlng.lat, e.latlng.lng);
         });
+
+        const syncManualCoords = () => {
+          const mLat = parseFloat(document.getElementById('edit-campus-lat').value);
+          const mLng = parseFloat(document.getElementById('edit-campus-lng').value);
+          if (!isNaN(mLat) && !isNaN(mLng) && this.campusPickerMarker && this.campusPickerMap) {
+            this.campusPickerMarker.setLatLng([mLat, mLng]);
+            if (this.campusPickerCircle) this.campusPickerCircle.setLatLng([mLat, mLng]);
+            this.campusPickerMap.setView([mLat, mLng], this.campusPickerMap.getZoom());
+          }
+        };
+        document.getElementById('edit-campus-lat')?.addEventListener('change', syncManualCoords);
+        document.getElementById('edit-campus-lng')?.addEventListener('change', syncManualCoords);
 
         const radiusInput = document.getElementById('edit-campus-radius');
         if (radiusInput) {
@@ -1745,11 +1771,16 @@ class AdminDesktopModule {
         </div>
       </div>
     `;
+    document.getElementById('modal-add-campus')?.remove();
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
     setTimeout(() => {
       const pickerEl = document.getElementById('add-campus-picker-map');
       if (pickerEl && window.L) {
+        if (this.addCampusMap) {
+          try { this.addCampusMap.remove(); } catch (e) {}
+          this.addCampusMap = null;
+        }
         this.addCampusMap = L.map('add-campus-picker-map', { zoomControl: true, attributionControl: false }).setView([10.735768115549721, 106.68071864291426], 16);
         L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', { maxZoom: 20 }).addTo(this.addCampusMap);
         this.addCampusMarker = L.marker([10.735768115549721, 106.68071864291426], { draggable: true }).addTo(this.addCampusMap);
@@ -1778,6 +1809,18 @@ class AdminDesktopModule {
           this.addCampusMarker.setLatLng(e.latlng);
           updateAddPickerPos(e.latlng.lat, e.latlng.lng);
         });
+
+        const syncAddManualCoords = () => {
+          const mLat = parseFloat(document.getElementById('campus-lat').value);
+          const mLng = parseFloat(document.getElementById('campus-lng').value);
+          if (!isNaN(mLat) && !isNaN(mLng) && this.addCampusMarker && this.addCampusMap) {
+            this.addCampusMarker.setLatLng([mLat, mLng]);
+            if (this.addCampusCircle) this.addCampusCircle.setLatLng([mLat, mLng]);
+            this.addCampusMap.setView([mLat, mLng], this.addCampusMap.getZoom());
+          }
+        };
+        document.getElementById('campus-lat')?.addEventListener('change', syncAddManualCoords);
+        document.getElementById('campus-lng')?.addEventListener('change', syncAddManualCoords);
 
         const radInput = document.getElementById('campus-radius');
         if (radInput) {

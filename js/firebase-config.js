@@ -5,7 +5,7 @@
  * Resilient Multi-Tier Login (Firebase Auth + Firestore fallback)
  */
 
-import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { 
   getFirestore, 
   collection, 
@@ -145,11 +145,14 @@ let secondaryApp, secondaryAuth;
 let isFirebaseOnline = false;
 
 try {
-  app = initializeApp(firebaseConfig);
+  const existingApps = getApps();
+  app = existingApps.some(a => a.name === '[DEFAULT]') ? getApp() : initializeApp(firebaseConfig);
   db = getFirestore(app);
   auth = getAuth(app);
 
-  secondaryApp = initializeApp(firebaseConfig, "SecondaryAuthApp");
+  secondaryApp = existingApps.some(a => a.name === 'SecondaryAuthApp')
+    ? getApp('SecondaryAuthApp')
+    : initializeApp(firebaseConfig, "SecondaryAuthApp");
   secondaryAuth = getAuth(secondaryApp);
 
   isFirebaseOnline = true;
@@ -173,17 +176,17 @@ export const COLLECTIONS = {
 };
 
 /**
- * Seed official campuses in Firestore (ONLY if document does not exist yet)
- * Never overwrites customized coordinates!
+ * Seed initial campuses in Firestore ONLY ONCE if the entire collection is completely empty.
+ * Never re-creates deleted campuses and never overwrites customized coordinates!
  */
 export async function seedOfficialCampuses() {
   if (!isFirebaseOnline || !db) {
     return;
   }
   try {
-    for (const campus of OFFICIAL_CAMPUSES) {
-      const snap = await getDoc(doc(db, COLLECTIONS.CAMPUSES, campus.id));
-      if (!snap.exists()) {
+    const existingCampusesSnap = await getDocs(collection(db, COLLECTIONS.CAMPUSES));
+    if (existingCampusesSnap.empty) {
+      for (const campus of OFFICIAL_CAMPUSES) {
         await setDoc(doc(db, COLLECTIONS.CAMPUSES, campus.id), campus);
         console.log("📍 Seeded initial campus to Firestore:", campus.name);
       }
@@ -245,39 +248,37 @@ export function initRealtimeFirestoreSync() {
     if (window.renderHomeUI) window.renderHomeUI();
   }, (err) => console.warn('Users sync notice:', err.message));
 
-  // 2. Sync CAMPUSES (Smart merge with OFFICIAL_CAMPUSES so defaults and customizations are never lost)
+  // 2. Sync CAMPUSES (Firestore is the single authoritative source of truth!)
   onSnapshot(collection(db, COLLECTIONS.CAMPUSES), (snapshot) => {
-    const firestoreCampuses = {};
+    const firestoreCampuses = [];
     snapshot.forEach(docSnap => {
-      firestoreCampuses[docSnap.id] = { id: docSnap.id, ...docSnap.data() };
-    });
-
-    const mergedCampuses = OFFICIAL_CAMPUSES.map(defaultC => {
-      return firestoreCampuses[defaultC.id] 
-        ? { ...defaultC, ...firestoreCampuses[defaultC.id] } 
-        : { ...defaultC };
-    });
-
-    // Add all custom branches from Firestore
-    Object.keys(firestoreCampuses).forEach(id => {
-      if (!mergedCampuses.some(c => c.id === id)) {
-        mergedCampuses.push(firestoreCampuses[id]);
-      }
-    });
-
-    // Also retain any newly created custom branches from local storage that are awaiting sync
-    const currentLocal = storage.getCampuses();
-    if (Array.isArray(currentLocal)) {
-      currentLocal.forEach(locC => {
-        if (!mergedCampuses.some(c => c.id === locC.id)) {
-          mergedCampuses.push(locC);
-        }
+      const data = docSnap.data();
+      const latNum = typeof data.lat === 'string' ? parseFloat(data.lat) : data.lat;
+      const lngNum = typeof data.lng === 'string' ? parseFloat(data.lng) : data.lng;
+      const radNum = parseInt(data.radiusMeters || data.radius || 150, 10);
+      firestoreCampuses.push({
+        ...data,
+        id: docSnap.id,
+        lat: isNaN(latNum) ? 10.735768115549721 : latNum,
+        lng: isNaN(lngNum) ? 106.68071864291426 : lngNum,
+        radiusMeters: isNaN(radNum) ? 150 : radNum,
+        radius: isNaN(radNum) ? 150 : radNum
       });
-    }
+    });
 
-    storage.saveCampuses(mergedCampuses);
+    // Sort so Trụ sở chính always appears first
+    firestoreCampuses.sort((a, b) => {
+      const aMain = (a.id === 'cs-chinh' || a.id === 'cs-caolo') ? 0 : 1;
+      const bMain = (b.id === 'cs-chinh' || b.id === 'cs-caolo') ? 0 : 1;
+      if (aMain !== bMain) return aMain - bMain;
+      return (a.name || '').localeCompare(b.name || '', 'vi');
+    });
+
+    storage.saveCampuses(firestoreCampuses);
     if (window.renderCampusesUI) window.renderCampusesUI();
     if (window.renderManagerMobileUI) window.renderManagerMobileUI();
+    if (window.renderRosterUI) window.renderRosterUI();
+    if (window.renderStaffUI) window.renderStaffUI();
   }, (err) => console.warn('Campuses sync notice:', err.message));
 
   // 3. Sync CHECKPOINTS
@@ -783,12 +784,17 @@ export async function deleteFirestoreCheckpoint(id) {
 
 export async function createFirestoreCampus(campusData) {
   const code = (campusData.code || 'CS').trim().toUpperCase();
-  const slug = code.toLowerCase().replace(/[^a-z0-9]/g, '') || `${Date.now()}`;
-  const campusId = campusData.id || `cs-${slug}`;
+  const slug = code.toLowerCase().replace(/[^a-z0-9]/g, '') || 'branch';
+  const existingList = storage.getCampuses();
+  let campusId = campusData.id || `cs-${slug}`;
+  if (!campusData.id && Array.isArray(existingList) && existingList.some(c => c.id === campusId)) {
+    campusId = `cs-${slug}-${Date.now().toString(36).slice(-4)}`;
+  }
 
   const latVal = typeof campusData.lat === 'string' ? parseFloat(campusData.lat) : campusData.lat;
   const lngVal = typeof campusData.lng === 'string' ? parseFloat(campusData.lng) : campusData.lng;
-  const radiusVal = campusData.radiusMeters ? parseInt(campusData.radiusMeters, 10) : (campusData.radius ? parseInt(campusData.radius, 10) : 150);
+  const radiusVal = parseInt(campusData.radiusMeters || campusData.radius || 150, 10);
+  const nowIso = new Date().toISOString();
 
   const cleanCampus = {
     id: campusId,
@@ -800,26 +806,21 @@ export async function createFirestoreCampus(campusData) {
     radiusMeters: isNaN(radiusVal) ? 150 : radiusVal,
     radius: isNaN(radiusVal) ? 150 : radiusVal,
     status: campusData.status || 'active',
-    createdAt: new Date().toISOString()
+    createdAt: nowIso
   };
 
-  if (isFirebaseOnline && db) {
-    try {
-      await setDoc(doc(db, COLLECTIONS.CAMPUSES, campusId), {
-        ...cleanCampus,
-        createdAt: serverTimestamp()
-      }, { merge: true });
-      console.log("✅ Firestore campus created successfully:", cleanCampus.name, campusId);
-    } catch (e) {
-      console.warn("Firestore create campus error (falling back to storage):", e);
-    }
+  if (!isFirebaseOnline || !db) {
+    throw new Error('Không thể kết nối Firebase Firestore. Vui lòng tải lại trang và kiểm tra kết nối mạng.');
   }
 
-  // IMMEDIATELY update storage cache so it renders without delay!
-  let list = storage.getCampuses();
-  if (!list || list.length === 0) {
-    list = OFFICIAL_CAMPUSES.map(c => ({ ...c }));
-  }
+  await setDoc(doc(db, COLLECTIONS.CAMPUSES, campusId), {
+    ...cleanCampus,
+    createdAt: serverTimestamp()
+  }, { merge: true });
+  console.log("✅ Firestore campus created successfully:", cleanCampus.name, campusId);
+
+  // Immediately update local storage cache
+  const list = Array.isArray(existingList) ? [...existingList] : [];
   const existingIdx = list.findIndex(c => c.id === campusId);
   if (existingIdx !== -1) {
     list[existingIdx] = cleanCampus;
@@ -832,35 +833,37 @@ export async function createFirestoreCampus(campusData) {
 }
 
 export async function updateFirestoreCampus(campusId, updates) {
+  const latVal = typeof updates.lat === 'string' ? parseFloat(updates.lat) : updates.lat;
+  const lngVal = typeof updates.lng === 'string' ? parseFloat(updates.lng) : updates.lng;
+  const radiusVal = parseInt(updates.radiusMeters || updates.radius || 150, 10);
+  const nowIso = new Date().toISOString();
+
   const cleanUpdates = {
     ...updates,
-    lat: typeof updates.lat === 'string' ? parseFloat(updates.lat) : updates.lat,
-    lng: typeof updates.lng === 'string' ? parseFloat(updates.lng) : updates.lng,
-    radiusMeters: updates.radiusMeters ? parseInt(updates.radiusMeters, 10) : (updates.radius ? parseInt(updates.radius, 10) : 150),
-    radius: updates.radiusMeters ? parseInt(updates.radiusMeters, 10) : (updates.radius ? parseInt(updates.radius, 10) : 150),
-    updatedAt: serverTimestamp()
+    id: campusId,
+    lat: isNaN(latVal) ? 10.735768115549721 : latVal,
+    lng: isNaN(lngVal) ? 106.68071864291426 : lngVal,
+    radiusMeters: isNaN(radiusVal) ? 150 : radiusVal,
+    radius: isNaN(radiusVal) ? 150 : radiusVal,
+    updatedAt: nowIso
   };
 
-  if (isFirebaseOnline && db) {
-    try {
-      await setDoc(doc(db, COLLECTIONS.CAMPUSES, campusId), {
-        id: campusId,
-        ...cleanUpdates
-      }, { merge: true });
-    } catch (e) {
-      console.warn("Firestore update campus error:", e);
-    }
+  if (!isFirebaseOnline || !db) {
+    throw new Error('Không thể kết nối Firebase Firestore. Vui lòng tải lại trang và kiểm tra kết nối mạng.');
   }
 
-  let list = storage.getCampuses();
-  if (!list || list.length === 0) {
-    list = OFFICIAL_CAMPUSES.map(c => ({ ...c }));
-  }
+  await setDoc(doc(db, COLLECTIONS.CAMPUSES, campusId), {
+    ...cleanUpdates,
+    updatedAt: serverTimestamp()
+  }, { merge: true });
+  console.log("✅ Firestore campus updated successfully:", campusId);
+
+  const list = Array.isArray(storage.getCampuses()) ? [...storage.getCampuses()] : [];
   const idx = list.findIndex(c => c.id === campusId);
   if (idx !== -1) {
     list[idx] = { ...list[idx], ...cleanUpdates };
   } else {
-    list.push({ id: campusId, ...cleanUpdates });
+    list.push(cleanUpdates);
   }
   storage.saveCampuses(list);
   return list;
@@ -870,13 +873,13 @@ export async function deleteFirestoreCampus(campusId) {
   if (campusId === 'cs-chinh' || campusId === 'cs-caolo') {
     throw new Error('Không thể xóa Trụ sở chính (Số 47 Cao Lỗ)! Bạn chỉ có thể sửa thông tin và tọa độ GPS.');
   }
-  if (isFirebaseOnline && db) {
-    try {
-      await deleteDoc(doc(db, COLLECTIONS.CAMPUSES, campusId));
-    } catch (e) {
-      console.warn("Firestore delete campus error:", e);
-    }
+  if (!isFirebaseOnline || !db) {
+    throw new Error('Không thể kết nối Firebase Firestore. Vui lòng tải lại trang và kiểm tra kết nối mạng.');
   }
+
+  await deleteDoc(doc(db, COLLECTIONS.CAMPUSES, campusId));
+  console.log("✅ Firestore campus deleted successfully:", campusId);
+
   const list = storage.getCampuses().filter(c => c.id !== campusId);
   storage.saveCampuses(list);
   return list;

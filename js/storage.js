@@ -209,28 +209,17 @@ class LocalStorageManager {
   // Campuses
   getCampuses() {
     let list = this.get(STORAGE_KEYS.CAMPUSES_CACHE, null);
-    if (!list || list.length === 0) {
-      this.saveCampuses(DEFAULT_OFFICIAL_CAMPUSES);
-      return DEFAULT_OFFICIAL_CAMPUSES;
+    if (list === null) {
+      return DEFAULT_OFFICIAL_CAMPUSES.map(c => ({ ...c }));
     }
-    // Migrate old hardcoded 10.74128 to user's official coordinates 10.735768115549721
-    let needsSave = false;
-    list = list.map(c => {
-      if ((c.id === 'cs-chinh' || c.id === 'cs-caolo') && (Math.abs(c.lat - 10.74128) < 0.001 || !c.lat)) {
-        needsSave = true;
-        return {
-          ...c,
-          id: 'cs-chinh',
-          lat: 10.735768115549721,
-          lng: 106.68071864291426
-        };
-      }
-      return c;
-    });
-    if (needsSave) {
-      this.saveCampuses(list);
+    if (!Array.isArray(list)) {
+      return [];
     }
-    return list;
+    return list.map(c => ({
+      ...c,
+      lat: typeof c.lat === 'string' ? parseFloat(c.lat) : c.lat,
+      lng: typeof c.lng === 'string' ? parseFloat(c.lng) : c.lng
+    }));
   }
 
   saveCampuses(list) {
