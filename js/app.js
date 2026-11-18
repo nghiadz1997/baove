@@ -36,8 +36,9 @@ class AppController {
     managerMobileModule.init();
     adminModule.init();
 
-    // Check user authentication
+    // Check user authentication & enforce role permissions immediately
     const currentUser = storage.getCurrentUser();
+    this.applyRolePermissions(currentUser);
     if (!currentUser) {
       this.showLoginModal();
     } else {
@@ -53,6 +54,7 @@ class AppController {
         console.log("📅 New day detected:", currentDayKey, "— refreshing daily patrol statuses.");
         this.renderHome();
         if (window.renderPatrolUI) window.renderPatrolUI();
+        if (window.renderShiftsUI) window.renderShiftsUI();
         if (window.renderDashboardUI) window.renderDashboardUI(true);
         if (window.renderManagerMobileUI) window.renderManagerMobileUI(true);
       }
@@ -75,21 +77,73 @@ class AppController {
     }
   }
 
+  isAdminUser(user) {
+    if (!user) return false;
+    return user.email === SUPER_ADMIN_EMAIL || Boolean(user.isSuperAdmin) || user.role === 'admin';
+  }
+
+  isManagerUser(user) {
+    if (!user) return false;
+    return this.isAdminUser(user) || user.role === 'manager' || user.role === 'phophong';
+  }
+
+  /**
+   * Strictly apply role-based UI visibility:
+   * - Guard: Hides ALL admin/manager switcher buttons, views, and admin controls
+   * - Manager: Can access Manager Mobile (and Guard view if needed), NEVER Desktop Admin
+   * - Admin / Super Admin: Full access to all views
+   */
+  applyRolePermissions(user) {
+    const switcher = document.getElementById('header-mode-switcher');
+    const guardBtn = document.querySelector('.view-mode-btn[data-mode="guard_mobile"]');
+    const mgrBtn = document.querySelector('.view-mode-btn[data-mode="manager_mobile"]');
+    const adminBtn = document.querySelector('.view-mode-btn[data-mode="desktop_admin"]');
+
+    if (!user) {
+      if (switcher) switcher.classList.add('hidden');
+      return;
+    }
+
+    const isAdmin = this.isAdminUser(user);
+    const isManager = this.isManagerUser(user);
+
+    if (!isManager) {
+      // Guard user: hide entire mode switcher & strictly forbid admin/manager UI
+      if (switcher) switcher.classList.add('hidden');
+      if (mgrBtn) mgrBtn.classList.add('hidden');
+      if (adminBtn) adminBtn.classList.add('hidden');
+    } else if (!isAdmin) {
+      // Manager / Phó phòng: hide Desktop Admin, allow Manager Mobile
+      if (switcher) switcher.classList.remove('hidden');
+      if (guardBtn) guardBtn.classList.remove('hidden');
+      if (mgrBtn) mgrBtn.classList.remove('hidden');
+      if (adminBtn) adminBtn.classList.add('hidden');
+    } else {
+      // Admin / Super Admin: full switcher
+      if (switcher) switcher.classList.remove('hidden');
+      if (guardBtn) guardBtn.classList.remove('hidden');
+      if (mgrBtn) mgrBtn.classList.remove('hidden');
+      if (adminBtn) adminBtn.classList.remove('hidden');
+    }
+  }
+
   routeUserByRole(user) {
     this.hideLoginModal();
-    const role = user.role || 'guard';
+    this.applyRolePermissions(user);
+    const isAdmin = this.isAdminUser(user);
+    const isManager = this.isManagerUser(user);
     const isSuper = user.email === SUPER_ADMIN_EMAIL || user.isSuperAdmin;
 
-    if (isSuper || role === 'admin') {
+    if (isAdmin) {
       if (window.innerWidth >= 1024) {
         this.switchViewMode('desktop_admin');
       } else {
         this.switchViewMode('manager_mobile');
       }
-    } else if (role === 'manager') {
+    } else if (isManager) {
       this.switchViewMode('manager_mobile');
     } else {
-      // guard
+      // guard: strictly locked to guard_mobile
       this.switchViewMode('guard_mobile');
       this.switchGuardTab('home');
     }
@@ -102,7 +156,7 @@ class AppController {
     if (userBadge && userEmail) {
       userBadge.classList.remove('hidden');
       userEmail.textContent = isSuper ? 'Super Admin' : (user.name || user.code || user.email);
-      userBadge.title = `Đã đăng nhập: ${user.email} (${(user.role || 'guard').toUpperCase()})`;
+      userBadge.title = `Đã đăng nhập: ${user.name || user.email}`;
     }
   }
 
@@ -201,6 +255,14 @@ class AppController {
   }
 
   switchViewMode(mode) {
+    const user = storage.getCurrentUser();
+    // Enforce strict role guard: Guards can NEVER open manager_mobile or desktop_admin!
+    if (user && !this.isManagerUser(user)) {
+      mode = 'guard_mobile';
+    } else if (user && !this.isAdminUser(user) && mode === 'desktop_admin') {
+      mode = 'manager_mobile';
+    }
+
     this.currentViewMode = mode;
     storage.setViewMode(mode);
 
@@ -340,14 +402,18 @@ class AppController {
     if (remainingCountEl) remainingCountEl.textContent = remainingCount;
     if (totalCountEl) totalCountEl.textContent = totalPoints;
 
-    // Recent scans
+    // Recent scans: Guard sees ONLY their own scans today (no admin/other-guard clutter)
     const recentListEl = document.getElementById('home-recent-scans-list');
     if (recentListEl) {
-      const guardLogs = patrolLogs.slice(0, 4);
+      const isGuardOnly = !this.isManagerUser(user);
+      const filteredLogs = isGuardOnly
+        ? patrolLogs.filter(l => (l.actualGuardId || l.guardId) === user.id && getLogDateKey(l) === todayKey)
+        : patrolLogs;
+      const guardLogs = filteredLogs.slice(0, 4);
       if (guardLogs.length === 0) {
         recentListEl.innerHTML = `
           <div class="py-6 text-center text-xs text-slate-400">
-            Chưa có lượt quét QR nào.
+            Chưa có lượt quét QR nào hôm nay.
           </div>
         `;
       } else {
@@ -395,7 +461,11 @@ class AppController {
     if (accPhone) accPhone.textContent = `SĐT: ${user.phone || 'Chưa cập nhật'}`;
     if (accCampus) accCampus.textContent = user.campusName || 'Cao Đẳng Nam Sài Gòn';
     if (accAvatar) accAvatar.src = user.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150';
-    if (accRole) accRole.textContent = `Vai trò: ${(user.role || 'guard').toUpperCase()}`;
+    if (accRole) {
+      const roleLabels = { admin: 'Quản trị viên', manager: 'Quản lý / Phó phòng', phophong: 'Quản lý / Phó phòng', guard: 'Nhân viên Bảo vệ' };
+      const label = (user.email === SUPER_ADMIN_EMAIL || user.isSuperAdmin) ? 'Super Admin' : (roleLabels[user.role] || 'Nhân viên Bảo vệ');
+      accRole.textContent = `Vai trò: ${label}`;
+    }
   }
 
   registerServiceWorker() {
@@ -412,7 +482,11 @@ window.appController = appController;
 window.renderHomeUI = () => appController.renderHome();
 window.sendResetPasswordPrompt = () => {
   const emailInput = document.getElementById('login-identifier');
-  const email = (emailInput?.value || '').trim() || SUPER_ADMIN_EMAIL;
+  const email = (emailInput?.value || '').trim();
+  if (!email || !email.includes('@')) {
+    alert('Vui lòng nhập địa chỉ Email tài khoản của bạn vào ô Email trước khi bấm Quên mật khẩu.');
+    return;
+  }
   if (confirm(`Bạn có muốn gửi link khôi phục mật khẩu đến email: ${email}?`)) {
     sendPasswordReset(email);
   }

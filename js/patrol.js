@@ -156,7 +156,7 @@ class PatrolModule {
             </div>
             <p class="font-bold text-slate-700 dark:text-slate-200 text-base">Chưa có điểm chốt tuần tra</p>
             <p class="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-xs mx-auto">
-              Quản trị viên vui lòng vào mục <strong>QR/GPS</strong> trên trang Quản Trị để thêm các chốt tuần tra thật của trường.
+              Hiện chưa có điểm chốt tuần tra nào được thiết lập. Vui lòng liên hệ quản lý nếu cần hỗ trợ.
             </p>
           </div>
         `;
@@ -239,16 +239,23 @@ class PatrolModule {
     const historyContainer = document.getElementById('patrol-history-list');
     if (!historyContainer) return;
 
-    if (!logs || logs.length === 0) {
+    const user = storage.getCurrentUser();
+    const todayKey = getTodayDateKey();
+    const isGuardOnly = user && (!user.role || user.role === 'guard') && !user.isSuperAdmin;
+    const scopedLogs = isGuardOnly
+      ? (logs || []).filter(l => (l.actualGuardId || l.guardId) === user.id && getLogDateKey(l) === todayKey)
+      : (logs || []);
+
+    if (scopedLogs.length === 0) {
       historyContainer.innerHTML = `
         <div class="py-6 text-center text-xs text-slate-400">
-          Chưa có nhật ký tuần tra nào.
+          Chưa có nhật ký tuần tra nào hôm nay.
         </div>
       `;
       return;
     }
 
-    const recentLogs = logs.slice(0, 10);
+    const recentLogs = scopedLogs.slice(0, 10);
     historyContainer.innerHTML = recentLogs.map(item => {
       const timeStr = new Date(item.scannedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       const isValid = item.gpsStatus === 'valid' || item.verificationStatus === 'verified_cloud';
