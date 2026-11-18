@@ -1245,9 +1245,11 @@ class AdminDesktopModule {
                           <div class="text-[10px] text-purple-700 dark:text-purple-300 mt-0.5">Phân công gốc: <strong>${r.assignedGuardName}</strong></div>
                           <div class="text-[10px] text-slate-400 italic line-clamp-1" title="${r.changeReason}">Lý do: ${r.changeReason || '—'}</div>
                         ` : ''}
-                        ${r.session.handoverCompleted ? `
+                        ${r.session.handoverCompleted && r.session.handoverToGuardName ? `
                           <div class="text-[10px] text-slate-500 mt-0.5">Bàn giao &rarr; <strong>${r.session.handoverToGuardName}</strong></div>
-                        ` : ''}
+                        ` : (r.session.handoverCompleted && r.session.handoverNotes ? `
+                          <div class="text-[10px] text-slate-500 mt-0.5 line-clamp-1">${r.session.handoverNotes}</div>
+                        ` : '')}
                       ` : '<span class="text-[11px] text-slate-400">Theo lịch cố định</span>'}
                     </td>
                     <td class="p-3 text-center font-mono font-extrabold ${r.patrolCount > 0 ? 'text-blue-600' : 'text-slate-400'}">
@@ -1259,15 +1261,11 @@ class AdminDesktopModule {
                           <button onclick="window.adminModule.handleAdminApproval('${r.session.id}', 'approve')" class="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px]">Duyệt</button>
                           <button onclick="window.adminModule.handleAdminApproval('${r.session.id}', 'reject')" class="px-2 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-[10px]">Từ chối</button>
                         </div>
-                      ` : (r.isSession && r.session.handoverCompleted ? `
-                        <button onclick="window.adminModule.viewSessionDetailModal('${r.session.id}')" class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[10px]">
-                          Xem bàn giao
-                        </button>
                       ` : (r.isSession ? `
                         <button onclick="window.adminModule.viewSessionDetailModal('${r.session.id}')" class="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[10px]">
                           Chi tiết
                         </button>
-                      ` : '<span class="text-[10px] text-rose-500 font-bold">Chưa quét QR</span>'))}
+                      ` : '<span class="text-[10px] text-rose-500 font-bold">Chưa quét QR</span>')}
                     </td>
                   </tr>
                 `;
@@ -1389,9 +1387,9 @@ class AdminDesktopModule {
             <div class="text-[10px] text-slate-500">Chưa quét QR Check-in</div>
           </div>
           <div class="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xs">
-            <div class="text-[10px] font-bold uppercase text-slate-500">6. Đã bàn giao ca</div>
+            <div class="text-[10px] font-bold uppercase text-slate-500">6. Đã kết thúc ca</div>
             <div class="text-2xl font-black text-slate-700 dark:text-slate-200 font-mono mt-1">${ov.checkedOutSessions.length}</div>
-            <div class="text-[10px] text-slate-500">Đã QR Check-out</div>
+            <div class="text-[10px] text-slate-500">Đã bấm kết thúc ca</div>
           </div>
         </div>
 
@@ -1404,7 +1402,7 @@ class AdminDesktopModule {
             <i class="fa-solid fa-clock-rotate-left mr-1.5"></i> Lịch Sử Thay Đổi & Phê Duyệt (${auditLogs.length})
           </button>
           <button onclick="window.adminModule.setCheckInTab('qr_cards')" class="px-4 py-2 rounded-xl font-bold text-xs transition ${this.checkInTab === 'qr_cards' ? 'bg-blue-600 text-white shadow-sm' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}">
-            <i class="fa-solid fa-qrcode mr-1.5"></i> Quản Lý & In Thẻ QR CHECK-IN / CHECK-OUT
+            <i class="fa-solid fa-qrcode mr-1.5"></i> Quản Lý & In Thẻ QR CHECK-IN
           </button>
         </div>
 
@@ -1469,30 +1467,26 @@ class AdminDesktopModule {
           <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 shadow-sm space-y-5">
             <div class="flex items-center justify-between flex-wrap gap-3">
               <div>
-                <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Hệ Thống 3 Loại Mã QR Định Danh Vị Trí (Không Chứa Dữ Liệu Cá Nhân)</h4>
+                <h4 class="font-bold text-base text-slate-800 dark:text-slate-100">Hệ Thống Mã QR Check-in Nhận Ca & Tuần Tra (Không Chứa Dữ Liệu Cá Nhân)</h4>
                 <p class="text-xs text-slate-500">
-                  <strong class="text-emerald-600">QR CHECK-IN</strong> (<code>NSG-CI:...</code>): Nhận ca •
-                  <strong class="text-blue-600">QR CHECKPOINT</strong>: Tuần tra chốt •
-                  <strong class="text-amber-600">QR CHECK-OUT</strong> (<code>NSG-CO:...</code>): Kết thúc & Bàn giao ca
+                  <strong class="text-emerald-600">QR CHECK-IN</strong> (<code>NSG-CI:...</code>): Quét nhận ca vào trực •
+                  <strong class="text-blue-600">QR CHECKPOINT</strong>: Quét tuần tra chốt •
+                  Khi hết ca, bảo vệ chỉ cần bấm <strong>Kết thúc ca</strong> (không cần quét QR ra hay bàn giao rườm rà)
                 </p>
               </div>
               <div class="flex gap-2">
                 <button onclick="window.adminModule.printSmartQrSheet('QR_CHECKIN')" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl">
                   <i class="fa-solid fa-print mr-1"></i> In Bộ Thẻ QR CHECK-IN
                 </button>
-                <button onclick="window.adminModule.printSmartQrSheet('QR_CHECKOUT')" class="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl">
-                  <i class="fa-solid fa-print mr-1"></i> In Bộ Thẻ QR CHECK-OUT
-                </button>
               </div>
             </div>
 
-            <!-- Campus-level Check-in / Check-out QR Cards -->
+            <!-- Campus-level Check-in QR Cards -->
             <div class="space-y-2">
-              <div class="text-xs font-extrabold uppercase tracking-wider text-slate-500">Mã QR Nhận Ca & Kết Thúc Ca Theo Cơ Sở</div>
+              <div class="text-xs font-extrabold uppercase tracking-wider text-slate-500">Mã QR Check-in Nhận Ca Theo Cơ Sở</div>
               <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
                 ${campusList.map(c => {
                   const ciCode = buildSmartQrPayload('QR_CHECKIN', `CAMPUS-${c.id}`);
-                  const coCode = buildSmartQrPayload('QR_CHECKOUT', `CAMPUS-${c.id}`);
                   const ciImg = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(ciCode)}`;
                   return `
                     <div class="p-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/40 text-center space-y-2">
@@ -1500,8 +1494,8 @@ class AdminDesktopModule {
                       <img src="${ciImg}" alt="${ciCode}" class="w-32 h-32 mx-auto rounded-xl border border-slate-200 bg-white p-1.5">
                       <div class="font-mono text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded inline-block">${ciCode}</div>
                       <div class="flex gap-1.5 pt-1">
-                        <button onclick="window.adminModule.previewSmartQrTrioModal('${c.name.replace(/'/g, '')}', '${c.address || ''}', '${ciCode}', null, '${coCode}')" class="flex-1 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px]">
-                          Xem Check-in & Check-out
+                        <button onclick="window.adminModule.previewSmartQrTrioModal('${c.name.replace(/'/g, '')}', '${c.address || ''}', '${ciCode}', null, null)" class="flex-1 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]">
+                          Xem & In QR Check-in
                         </button>
                       </div>
                     </div>
@@ -1510,23 +1504,22 @@ class AdminDesktopModule {
               </div>
             </div>
 
-            <!-- Checkpoint-level 3-in-1 QR Table -->
+            <!-- Checkpoint-level QR Cards -->
             ${checkpoints.length > 0 ? `
               <div class="space-y-2 pt-2">
-                <div class="text-xs font-extrabold uppercase tracking-wider text-slate-500">Mã QR Theo Từng Chốt Trực (${checkpoints.length} chốt)</div>
+                <div class="text-xs font-extrabold uppercase tracking-wider text-slate-500">Mã QR Check-in & Tuần Tra Theo Từng Chốt (${checkpoints.length} chốt)</div>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   ${checkpoints.map(cp => {
                     const ciCode = buildSmartQrPayload('QR_CHECKIN', cp.code);
                     const cpCode = buildSmartQrPayload('QR_CHECKPOINT', cp.code);
-                    const coCode = buildSmartQrPayload('QR_CHECKOUT', cp.code);
                     return `
                       <div class="p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2 text-xs">
                         <div class="min-w-0">
                           <div class="font-bold text-slate-800 dark:text-slate-100 truncate">${cp.name}</div>
                           <div class="text-[10px] text-slate-400 truncate">${cp.campusName || ''} • ${cp.code}</div>
                         </div>
-                        <button onclick="window.adminModule.previewSmartQrTrioModal('${cp.name.replace(/'/g, '')}', '${(cp.campusName || '').replace(/'/g, '')}', '${ciCode}', '${cpCode}', '${coCode}')" class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-black text-white font-bold text-[11px] shrink-0">
-                          <i class="fa-solid fa-qrcode mr-1"></i> Bộ 3 QR
+                        <button onclick="window.adminModule.previewSmartQrTrioModal('${cp.name.replace(/'/g, '')}', '${(cp.campusName || '').replace(/'/g, '')}', '${ciCode}', '${cpCode}', null)" class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-black text-white font-bold text-[11px] shrink-0">
+                          <i class="fa-solid fa-qrcode mr-1"></i> Xem QR
                         </button>
                       </div>
                     `;
@@ -1543,9 +1536,9 @@ class AdminDesktopModule {
   previewSmartQrTrioModal(title, subtitle, checkInCode, checkpointCode, checkOutCode) {
     document.getElementById('modal-smart-qr-trio')?.remove();
     const cards = [
-      { label: 'QR CHECK-IN (NHẬN CA)', code: checkInCode, color: 'text-emerald-700 bg-emerald-50 border-emerald-300' },
+      checkInCode ? { label: 'QR CHECK-IN (NHẬN CA)', code: checkInCode, color: 'text-emerald-700 bg-emerald-50 border-emerald-300' } : null,
       checkpointCode ? { label: 'QR CHECKPOINT (TUẦN TRA)', code: checkpointCode, color: 'text-blue-700 bg-blue-50 border-blue-300' } : null,
-      { label: 'QR CHECK-OUT (KẾT THÚC CA)', code: checkOutCode, color: 'text-amber-700 bg-amber-50 border-amber-300' }
+      checkOutCode ? { label: 'QR CHECK-OUT (KẾT THÚC CA)', code: checkOutCode, color: 'text-amber-700 bg-amber-50 border-amber-300' } : null
     ].filter(Boolean);
 
     const modalHtml = `
@@ -2237,8 +2230,8 @@ class AdminDesktopModule {
                       <button onclick="window.adminModule.previewQrModal('${cp.id}')" class="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-bold" title="QR Tuần tra chốt">
                         <i class="fa-solid fa-qrcode"></i> QR
                       </button>
-                      <button onclick="window.adminModule.previewSmartQrTrioModal('${(cp.name || '').replace(/'/g, '')}', '${(cp.campusName || '').replace(/'/g, '')}', 'NSG-CI:${cp.code}', '${cp.code}', 'NSG-CO:${cp.code}')" class="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold" title="Xem & in bộ 3 QR: Check-in, Checkpoint, Check-out">
-                        3 QR
+                      <button onclick="window.adminModule.previewSmartQrTrioModal('${(cp.name || '').replace(/'/g, '')}', '${(cp.campusName || '').replace(/'/g, '')}', 'NSG-CI:${cp.code}', '${cp.code}', null)" class="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold" title="Xem & in QR Nhận Ca + Tuần Tra">
+                        QR Nhận Ca
                       </button>
                       <button onclick="window.adminModule.deleteCheckpoint('${cp.id}')" class="px-2 py-1 text-rose-600 hover:bg-rose-50 rounded text-xs font-bold" title="Xóa chốt">
                         <i class="fa-solid fa-trash-can"></i>

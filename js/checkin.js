@@ -112,7 +112,7 @@ class SmartCheckInModule {
             </div>
 
             <button onclick="window.smartCheckInModule.startCheckOutFlow()" class="w-full py-3 rounded-2xl bg-slate-900 hover:bg-black dark:bg-slate-700 dark:hover:bg-slate-600 text-white font-extrabold text-xs transition flex items-center justify-center gap-2 active:scale-[0.98] shadow-sm">
-              <i class="fa-solid fa-right-from-bracket"></i> KẾT THÚC CA & BÀN GIAO (QUÉT QR CHECK-OUT)
+              <i class="fa-solid fa-right-from-bracket"></i> KẾT THÚC CA TRỰC
             </button>
           </div>
         `;
@@ -151,8 +151,8 @@ class SmartCheckInModule {
               <div class="flex items-center gap-2.5">
                 <div class="w-9 h-9 rounded-xl bg-slate-600 text-white flex items-center justify-center"><i class="fa-solid fa-flag-checkered"></i></div>
                 <div>
-                  <div class="text-[10px] font-extrabold uppercase text-slate-500">ĐÃ KẾT THÚC & BÀN GIAO CA HÔM NAY</div>
-                  <div class="font-bold text-xs text-slate-800 dark:text-slate-100">Kết thúc lúc ${coTime} • Bàn giao: ${currentSession.handoverToGuardName || 'Ca kế tiếp'}</div>
+                  <div class="text-[10px] font-extrabold uppercase text-slate-500">ĐÃ KẾT THÚC CA HÔM NAY</div>
+                  <div class="font-bold text-xs text-slate-800 dark:text-slate-100">Kết thúc lúc ${coTime} • Người ca sau có thể quét QR nhận ca</div>
                 </div>
               </div>
             </div>
@@ -197,7 +197,7 @@ class SmartCheckInModule {
           </div>
           <div class="text-left">
             <div class="font-extrabold">Kết Thúc Ca</div>
-            <div class="text-[10px] text-slate-500 font-normal">QR Check-out & Bàn giao</div>
+            <div class="text-[10px] text-slate-500 font-normal">Bấm xác nhận kết thúc</div>
           </div>
         `;
       } else {
@@ -282,7 +282,7 @@ class SmartCheckInModule {
 
     const active = getActiveDutySessionForGuard(user.id);
     if (active) {
-      if (confirm(`Bạn đang giữ phiên trực tại "${active.postName}" (Nhận lúc ${new Date(active.checkInTime).toLocaleTimeString('vi-VN')}).\n\nKhông thể tạo thêm phiên trực song song. Bạn có muốn chuyển sang Kết Thúc Ca & Bàn Giao không?`)) {
+      if (confirm(`Bạn đang giữ phiên trực tại "${active.postName}" (Nhận lúc ${new Date(active.checkInTime).toLocaleTimeString('vi-VN')}).\n\nBạn có muốn Kết Thúc Ca Trực hiện tại không?`)) {
         this.startCheckOutFlow();
       }
       return;
@@ -544,7 +544,8 @@ class SmartCheckInModule {
   }
 
   /**
-   * Step 3: Start Check-out & Handover Flow via QR Check-out Scanner
+   * Step 3: Direct 1-Tap End Shift Flow (No QR Check-out scan & no handover form required!)
+   * Once ended, the next guard simply scans QR Check-in to start their own shift.
    */
   startCheckOutFlow() {
     const user = storage.getCurrentUser();
@@ -555,15 +556,12 @@ class SmartCheckInModule {
       return;
     }
 
-    if (window.scannerManager) {
-      window.scannerManager.openScanner(null, 'checkout');
-    } else {
-      alert('Trình quét QR chưa sẵn sàng.');
-    }
+    const currentLoc = window.scannerManager?.currentLocation || null;
+    this.openSimpleEndShiftModal(user, active, currentLoc);
   }
 
   /**
-   * Step 4: Process scanned QR Check-out & open Handover Modal
+   * Backward-compatible handler if a legacy QR Check-out is ever scanned
    */
   handleCheckOutQrScanned(decodedText, gpsLocation) {
     const user = storage.getCurrentUser();
@@ -578,43 +576,24 @@ class SmartCheckInModule {
       };
     }
 
-    const parsed = parseSmartQrPayload(decodedText);
-    if (!parsed.valid) {
-      return {
-        handled: false,
-        code: 'INVALID_QR',
-        message: parsed.reason
-      };
-    }
-
     if (window.scannerManager) {
       window.scannerManager.playSuccessSound();
       window.scannerManager.closeScanner();
     }
 
-    this.openCheckOutHandoverModal(user, activeSession, parsed, gpsLocation);
+    this.openSimpleEndShiftModal(user, activeSession, gpsLocation);
     return { handled: true };
   }
 
   /**
-   * Handover & Shift End Modal
+   * Simple 1-Step End Shift Confirmation Modal (No QR scan, no handover recipient needed)
    */
-  openCheckOutHandoverModal(guard, activeSession, parsedQr, gpsLocation) {
+  openSimpleEndShiftModal(guard, activeSession, gpsLocation = null) {
     document.getElementById('modal-smart-checkout-handover')?.remove();
 
-    const allGuards = storage.getUsers().filter(u => u.role === 'guard' && u.id !== guard.id);
-    const todayKey = getTodayDateKey();
-    const todayIncidents = storage.getIncidents().filter(inc => {
-      const d = inc.reportedAt ? inc.reportedAt.slice(0, 10) : '';
-      return d === todayKey;
-    });
     const sessionPatrolCount = storage.getPatrolLogs().filter(l =>
       l.dutySessionId === activeSession.id || (getLogDateKey(l) === activeSession.workDate && (l.actualGuardId || l.guardId) === guard.id && isPatrolLogValid(l))
     ).length;
-
-    const defaultIncidentText = todayIncidents.length > 0
-      ? todayIncidents.map(i => `• ${i.title} (${i.severity || 'normal'})`).join('\n')
-      : '';
 
     const modalHtml = `
       <div id="modal-smart-checkout-handover" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
@@ -622,9 +601,9 @@ class SmartCheckInModule {
           <div class="flex items-start justify-between">
             <div>
               <span class="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-200 uppercase">
-                QR CHECK-OUT • BÀN GIAO CA TRỰC
+                NSG SMART CHECK-IN
               </span>
-              <h3 class="font-extrabold text-base text-slate-900 dark:text-white mt-1">Kết Thúc Ca & Bàn Giao</h3>
+              <h3 class="font-extrabold text-base text-slate-900 dark:text-white mt-1">Xác Nhận Kết Thúc Ca Trực</h3>
             </div>
             <button onclick="document.getElementById('modal-smart-checkout-handover').remove()" class="text-slate-400 hover:text-slate-600 text-lg">
               <i class="fa-solid fa-xmark"></i>
@@ -633,7 +612,7 @@ class SmartCheckInModule {
 
           <div class="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs space-y-1.5">
             <div class="flex justify-between">
-              <span class="text-slate-500">Người bàn giao:</span>
+              <span class="text-slate-500">Nhân sự trực:</span>
               <strong class="text-slate-900 dark:text-white">${activeSession.guardName}</strong>
             </div>
             <div class="flex justify-between">
@@ -641,37 +620,28 @@ class SmartCheckInModule {
               <strong class="text-blue-600">${activeSession.postName}</strong>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Nhận ca lúc:</span>
+              <span class="text-slate-500">Ca trực:</span>
+              <strong class="text-slate-800 dark:text-slate-200">${activeSession.shiftName}</strong>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-500">Giờ nhận ca:</span>
               <strong class="font-mono">${new Date(activeSession.checkInServerIso || activeSession.checkInTime).toLocaleTimeString('vi-VN')}</strong>
             </div>
             <div class="flex justify-between">
               <span class="text-slate-500">Tuần tra hoàn thành:</span>
               <strong class="text-emerald-600 font-mono">${sessionPatrolCount} lượt quét</strong>
             </div>
-            <div class="flex justify-between">
-              <span class="text-slate-500">Mã QR Check-out:</span>
-              <span class="font-mono font-bold text-[11px]">${parsedQr.rawQr}</span>
-            </div>
           </div>
 
           <form id="form-smart-checkout-handover" class="space-y-3 text-xs">
             <div>
-              <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Người nhận bàn giao (Ca tiếp theo) *</label>
-              <select id="co-handover-to" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-bold" required>
-                <option value="">-- Chọn nhân sự nhận bàn giao --</option>
-                ${allGuards.map(g => `<option value="${g.id}" data-name="${g.name} (${g.code})">${g.name} (${g.code}) — ${g.campusName || 'Trụ sở chính'}</option>`).join('')}
-                <option value="next_shift_unassigned" data-name="Tổ trực ca tiếp theo / Ban Quản Lý">Tổ trực ca tiếp theo / Ban Quản Lý</option>
-              </select>
+              <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Ghi chú kết thúc ca (Không bắt buộc)</label>
+              <input type="text" id="co-handover-notes" placeholder="VD: Ca trực bình thường, không có sự cố..." class="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
             </div>
 
-            <div>
-              <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Ghi chú tình hình an ninh trong ca *</label>
-              <textarea id="co-handover-notes" rows="2" placeholder="VD: Tình hình an ninh trật tự ổn định, chìa khóa & bộ đàm bàn giao đầy đủ..." class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800" required>Tình hình an ninh trong ca bình thường, bàn giao đầy đủ tài sản và trang thiết bị trực.</textarea>
-            </div>
-
-            <div>
-              <label class="block font-bold text-slate-700 dark:text-slate-300 mb-1">Sự cố phát sinh trong ca (Nếu có)</label>
-              <textarea id="co-incident-summary" rows="2" placeholder="Ghi nhận sự cố phát sinh hoặc để trống nếu an toàn..." class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">${defaultIncidentText}</textarea>
+            <div class="text-[11px] text-slate-500 bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 p-2.5 rounded-xl">
+              <i class="fa-solid fa-circle-info text-blue-600 mr-1"></i>
+              Sau khi bạn bấm <strong>Kết Thúc Ca</strong>, phiên trực sẽ tự động đóng và nhân viên ca tiếp theo chỉ cần quét mã QR Check-in để vào ca.
             </div>
 
             <div class="pt-1 flex gap-2">
@@ -679,7 +649,7 @@ class SmartCheckInModule {
                 Hủy
               </button>
               <button type="submit" id="btn-submit-smart-checkout" class="flex-1 py-3 rounded-2xl bg-slate-900 hover:bg-black text-white font-extrabold shadow-md transition flex items-center justify-center gap-1.5">
-                <i class="fa-solid fa-flag-checkered"></i> Xác Nhận Kết Thúc Ca & Bàn Giao
+                <i class="fa-solid fa-flag-checkered"></i> Xác Nhận Kết Thúc Ca
               </button>
             </div>
           </form>
@@ -691,24 +661,20 @@ class SmartCheckInModule {
 
     document.getElementById('form-smart-checkout-handover').onsubmit = async (e) => {
       e.preventDefault();
-      const toSelect = document.getElementById('co-handover-to');
-      const handoverToGuardId = toSelect.value;
-      const handoverToGuardName = toSelect.options[toSelect.selectedIndex]?.getAttribute('data-name') || 'Ca kế tiếp';
-      const handoverNotes = document.getElementById('co-handover-notes').value.trim();
-      const incidentSummary = document.getElementById('co-incident-summary').value.trim();
+      const handoverNotes = document.getElementById('co-handover-notes')?.value?.trim() || 'Ca trực hoàn thành an toàn';
 
       const btn = document.getElementById('btn-submit-smart-checkout');
       btn.disabled = true;
-      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang khóa phiên & lưu bàn giao...';
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang kết thúc ca...';
 
       try {
         const ended = await checkoutDutySessionWithTransaction(activeSession.id, {
           guard,
-          checkOutQrCode: parsedQr.rawQr,
-          handoverToGuardId,
-          handoverToGuardName,
+          checkOutQrCode: 'DIRECT_END_SHIFT',
+          handoverToGuardId: '',
+          handoverToGuardName: '',
           handoverNotes,
-          incidentSummary,
+          incidentSummary: '',
           location: gpsLocation
         });
 
@@ -719,10 +685,10 @@ class SmartCheckInModule {
         if (window.renderDashboardUI) window.renderDashboardUI();
         if (window.renderManagerMobileUI) window.renderManagerMobileUI();
 
-        alert(`✅ ĐÃ KẾT THÚC CA & BÀN GIAO THÀNH CÔNG!\n\nNgười bàn giao: ${ended.handoverFromGuardName}\nNgười nhận bàn giao: ${ended.handoverToGuardName}\nGiờ kết thúc: ${new Date(ended.checkOutTime).toLocaleTimeString('vi-VN')}\n\nPhiên trực đã được khóa an toàn trên Firestore.`);
+        alert(`✅ ĐÃ KẾT THÚC CA TRỰC THÀNH CÔNG!\n\nNhân sự: ${ended.guardName}\nGiờ kết thúc: ${new Date(ended.checkOutTime).toLocaleTimeString('vi-VN')}\n\nNhân viên ca tiếp theo có thể quét mã QR Check-in để nhận ca mới.`);
       } catch (err) {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-flag-checkered"></i> Xác Nhận Kết Thúc Ca & Bàn Giao';
+        btn.innerHTML = '<i class="fa-solid fa-flag-checkered"></i> Xác Nhận Kết Thúc Ca';
         alert('❌ Không thể kết thúc ca:\n' + err.message);
       }
     };
